@@ -1,11 +1,11 @@
 #!/bin/bash
 # Installs the Codex ↔ Claude bridge on macOS:
-#  - background service (LaunchAgent) on 127.0.0.1:8787
+#  - background service (LaunchAgent) on 127.0.0.1:18787
 #  - points Codex at it with one line in ~/.codex/config.toml (backed up first)
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-PORT="${CODEX_CLAUDE_BRIDGE_PORT:-8787}"
+PORT="${CODEX_CLAUDE_BRIDGE_PORT:-18787}"
 LABEL="com.codex-claude-bridge"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 BRIDGE_HOME="$HOME/.codex-claude-bridge"
@@ -44,8 +44,8 @@ JSON
 else
   "$NODE" -e '
     const fs=require("fs"), f=process.argv[1], c=JSON.parse(fs.readFileSync(f,"utf8"));
-    c.claudePath=process.argv[2]; fs.writeFileSync(f, JSON.stringify(c,null,2)+"\n");' "$BRIDGE_HOME/config.json" "$CLAUDE"
-  say "updated claudePath in $BRIDGE_HOME/config.json"
+    c.claudePath=process.argv[2]; c.port=Number(process.argv[3]); fs.writeFileSync(f, JSON.stringify(c,null,2)+"\n");' "$BRIDGE_HOME/config.json" "$CLAUDE" "$PORT"
+  say "updated claudePath and port in $BRIDGE_HOME/config.json"
 fi
 
 # --- LaunchAgent ----------------------------------------------------------------
@@ -74,6 +74,10 @@ cat > "$PLIST" <<PLIST
 </plist>
 PLIST
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+sleep 1
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  die "port $PORT is already used by: $(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | awk 'NR==2{print $1" (pid "$2")"}'). Re-run with CODEX_CLAUDE_BRIDGE_PORT=<free port>."
+fi
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 say "service started (logs: $LOG)"
 

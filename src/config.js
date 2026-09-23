@@ -11,7 +11,7 @@ export const BASE_PATH = '/backend-api/codex';
 
 export const DEFAULTS = {
   host: '127.0.0.1',
-  port: 8787,
+  port: 18787,
   // Where GPT traffic is forwarded, unchanged.
   upstream: 'https://chatgpt.com/backend-api/codex',
   // Absolute path is best when running under launchd (PATH is minimal there).

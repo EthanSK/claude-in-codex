@@ -3,7 +3,7 @@
 Use Claude from the **Codex app**: Opus 5.5 and Fable appear in Codex's model picker next to your GPT models. Pick one and that thread runs on your local **Claude Code CLI**, covered by your Claude subscription. GPT keeps working exactly as before.
 
 ```
-Codex app ──► 127.0.0.1:8787 ──┬─ GPT model    → chatgpt.com (unchanged, your ChatGPT login)
+Codex app ──► 127.0.0.1:18787 ──┬─ GPT model    → chatgpt.com (unchanged, your ChatGPT login)
                                └─ Claude model → `claude -p` in the thread's folder (your Claude login)
 ```
 
@@ -18,8 +18,8 @@ Claude Code does the real work: its own agent loop, tools, CLAUDE.md, skills and
 Then quit and reopen Codex. The script:
 
 - finds `node` (20+) and `claude`
-- starts a LaunchAgent on `127.0.0.1:8787` (logs: `~/Library/Logs/codex-claude-bridge.log`)
-- backs up `~/.codex/config.toml` and adds one line: `openai_base_url = "http://127.0.0.1:8787/backend-api/codex"`
+- starts a LaunchAgent on `127.0.0.1:18787` (logs: `~/Library/Logs/codex-claude-bridge.log`)
+- backs up `~/.codex/config.toml` and adds one line: `openai_base_url = "http://127.0.0.1:18787/backend-api/codex"`
 
 To remove everything: `./scripts/uninstall.sh`.
 
@@ -55,7 +55,7 @@ Housekeeping requests Codex makes while a Claude model is selected (thread title
 
 ```json
 {
-  "port": 8787,
+  "port": 18787,
   "claudePath": "/Users/you/.local/bin/claude",
   "models": [
     { "slug": "claude-opus-5-5", "displayName": "Opus 5.5", "claudeModel": "claude-opus-5-5" },
