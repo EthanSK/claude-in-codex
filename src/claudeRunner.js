@@ -49,13 +49,15 @@ async function withSessionLock(key, fn) {
   const prev = sessionLocks.get(key) || Promise.resolve();
   let release;
   const next = new Promise((r) => (release = r));
-  sessionLocks.set(key, prev.then(() => next));
+  const queued = prev.then(() => next);
+  sessionLocks.set(key, queued);
   await prev;
   try {
     return await fn();
   } finally {
     release();
-    if (sessionLocks.get(key) === next) sessionLocks.delete(key);
+    // Compare the promise stored in the map; comparing `next` leaked every completed session key.
+    if (sessionLocks.get(key) === queued) sessionLocks.delete(key);
   }
 }
 

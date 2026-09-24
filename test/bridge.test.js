@@ -420,16 +420,42 @@ test('compaction of a Claude thread runs /compact and returns one compaction ite
   assert.equal(JSON.parse(last.stdin).message.content[0].text, 'after');
 });
 
-test('websocket upgrade without a model hint gets 426 so older Codex falls back to HTTP', async () => {
-  const res = await new Promise((resolve) => {
-    const s = net.connect(port, '127.0.0.1', () => {
-      s.write('GET /backend-api/codex/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n');
-    });
-    let d = '';
-    s.on('data', (c) => (d += c));
-    s.on('end', () => resolve(d));
+test('unhinted websocket prewarms GPT and Claude without an upgrade error', async () => {
+  upstreamUpgradeRequests = [];
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`, {
+    headers: { authorization: 'Bearer test' },
   });
-  assert.match(res, /^HTTP\/1.1 426/);
+  await new Promise((resolve, reject) => {
+    socket.once('open', resolve);
+    socket.once('error', reject);
+  });
+  try {
+    socket.send(JSON.stringify({ type: 'response.create', model: 'gpt-6-astra', generate: false }));
+    const gptPrewarm = await new Promise((resolve, reject) => {
+      socket.once('message', (data) => resolve(data.toString()));
+      socket.once('error', reject);
+    });
+    assert.equal(gptPrewarm, 'OK');
+    assert.equal(upstreamUpgradeRequests[0].headers['x-codex-routing-hint'], 'model=gpt-6-astra');
+
+    const priorClaudeCalls = readClaudeLog().length;
+    socket.send(JSON.stringify({ type: 'response.create', model: 'claude-opus-5-5', generate: false }));
+    const claudePrewarm = await new Promise((resolve, reject) => {
+      const onMessage = (data) => {
+        const event = JSON.parse(data.toString());
+        if (event.type === 'response.completed') {
+          socket.off('message', onMessage);
+          resolve(event);
+        }
+      };
+      socket.on('message', onMessage);
+      socket.once('error', reject);
+    });
+    assert.equal(claudePrewarm.response.model, 'claude-opus-5-5');
+    assert.equal(readClaudeLog().length, priorClaudeCalls);
+  } finally {
+    socket.close();
+  }
 });
 
 test('a fresh Opus websocket side chat reaches Claude and can later switch to GPT', async () => {

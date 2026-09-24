@@ -24,6 +24,24 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-24T16:17:00Z
+**Trigger:** Other running Codex tasks repeatedly logged WebSocket startup errors
+**Symptom:** Codex's `agent-bridge-codex-channel` tried to prewarm GPT WebSockets without a model hint and received HTTP 426 every roughly 30 seconds. The bridge process stayed up, but the retries produced persistent errors and could delay connection setup.
+**Root cause:** `proxyWebSocket` rejected all unhinted upgrades even though their later frames identify GPT or Claude. The first lazy GPT upstream connection also needed the frame's actual model in its routing hint, rather than a fixed fallback model.
+**Fix:** `src/server.js` accepts unhinted WebSockets, routes each frame by its model, and uses the first GPT frame's model for the upstream handshake.
+**Guard:** `test/bridge.test.js` prewarms GPT and Claude on an unhinted socket and checks the upstream GPT routing hint. Verify the installed service has restarted before judging live Codex behavior.
+---
+
+---
+**Date:** 2026-09-24T16:16:00Z
+**Trigger:** Reviewing long-running bridge state while investigating chats that appeared stuck
+**Symptom:** Code inspection showed `sessionLocks` kept a completed entry for every Claude session; the map stored one promise but compared it to a different promise before deleting.
+**Root cause:** `withSessionLock` stored `prev.then(() => next)` and later compared the map value with `next`, so the cleanup condition could never be true.
+**Fix:** `src/claudeRunner.js` compares the map value with the exact queued promise it stored, releasing the key after the last turn for that session.
+**Guard:** Keep the stored and compared promise identical when changing session serialization. This was a retention bug, not evidence that the active Claude chats were deadlocked.
+---
+
+---
 **Date:** 2026-09-24T15:45:00Z
 **Trigger:** A normal GPT side chat failed right after "Context automatically compacted"
 **Symptom:** Codex desktop showed `The encrypted content for item cmp_ccb_… could not be verified. Reason: Encrypted content could not be decrypted or parsed.` in a GPT-6 Sol side chat of an Opus thread.

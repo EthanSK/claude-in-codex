@@ -279,10 +279,10 @@ export function createBridge(config = loadConfig(), state = new State()) {
         const s = sanitizeInputForOpenAI(body.input);
         if (s.changed) {
           body.input = s.input;
-          return forwardGpt(JSON.stringify(body), false);
+          return forwardGpt(JSON.stringify(body), false, body.model);
         }
       }
-      return forwardGpt(data, isBinary);
+      return forwardGpt(data, isBinary, body?.model);
     }
     if (body.generate === false) {
       const stream = new ResponsesStream(new WebSocketResponse(client), { model: body.model });
@@ -294,7 +294,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
       body.model = fallbackGptModel(config, state);
       if (body.reasoning?.effort && !['low', 'medium', 'high'].includes(body.reasoning.effort)) body.reasoning.effort = 'medium';
       if (Array.isArray(body.input)) body.input = sanitizeInputForOpenAI(body.input).input;
-      return forwardGpt(JSON.stringify(body), false);
+      return forwardGpt(JSON.stringify(body), false, body.model);
     }
     const metadata = body.client_metadata || {};
     const turnReq = {
@@ -317,25 +317,23 @@ export function createBridge(config = loadConfig(), state = new State()) {
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.pathname !== `${BASE_PATH}/responses`) return rejectWebSocket(socket, '404 Not Found');
 
-    // Codex 0.155+ names the model before the upgrade. Older clients omit this
-    // hint, so keep their known-good HTTP fallback instead of guessing a route.
+    // Some Codex clients omit the model hint, even in current prewarm requests.
+    // Accept the socket and route its frames by model instead of making those
+    // clients repeatedly fail the upgrade and retry over HTTP.
     const model = String(req.headers['x-codex-routing-hint'] || '').match(/(?:^|;)\s*model=([\w.-]+)/)?.[1];
-    if (!model) return rejectWebSocket(socket);
-
-    if (isClaude(model)) {
-      // A fresh side chat can start with Claude in the handshake; it will not
-      // retry over HTTP when this upgrade is rejected. Open GPT lazily if a later
-      // frame on this same socket switches models or requests housekeeping.
+    if (!model || isClaude(model)) {
+      // A fresh side chat can start with Claude, or omit the hint entirely.
+      // Open GPT lazily if a frame on this socket needs it.
       const wss = new WebSocketServer({ noServer: true, perMessageDeflate: true });
       wss.handleUpgrade(req, socket, head, (client) => {
-        log.info(`local Claude websocket model=${model}`);
+        log.info(`local routed websocket model=${model || 'unhinted'}`);
         let upstream;
         const pendingGpt = [];
-        const forwardGpt = (data, isBinary) => {
+        const forwardGpt = (data, isBinary, frameModel) => {
           if (!upstream) {
             const target = new URL(`${config.upstream}/responses${url.search}`);
             target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
-            const headers = { ...req.headers, 'x-codex-routing-hint': `model=${fallbackGptModel(config, state)}` };
+            const headers = { ...req.headers, 'x-codex-routing-hint': `model=${frameModel || fallbackGptModel(config, state)}` };
             for (const key of Object.keys(headers)) {
               if (['host', 'connection', 'upgrade', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions'].includes(key)) delete headers[key];
             }
