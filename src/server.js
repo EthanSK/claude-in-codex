@@ -189,7 +189,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
     const models = mergeCatalog(config, state, upstreamModels);
     const headers = { 'content-type': 'application/json' };
     if (etag) {
-      const extra = JSON.stringify([config.models, state.data.contextWindows]);
+      const extra = JSON.stringify([config.models, config.hiddenModels, state.data.contextWindows]);
       headers.etag = `"ccb-${crypto.createHash('sha1').update(etag + extra).digest('hex').slice(0, 16)}"`;
     }
     res.writeHead(200, headers);
