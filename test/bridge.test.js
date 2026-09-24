@@ -393,3 +393,13 @@ test('Codex skills catalog is passed to Claude', async () => {
   assert.match(system, /write-user-facing-messages/);
   assert.match(system, /read its SKILL\.md/);
 });
+
+test('a failed shell command shows its description and last output line, not just the exit code', async () => {
+  const { describeToolError } = await import('../src/toolDisplay.js');
+  const shown = describeToolError('Bash', 'Exit code 1\nok so far\ncould not create image from display', 'Take a screenshot');
+  assert.match(shown, /^\*\*Failed:\*\* Take a screenshot \(exit 1\)/);
+  assert.match(shown, /could not create image from display/);
+  assert.doesNotMatch(shown, /ok so far/);
+  assert.equal(describeToolError('Bash', 'Exit code 2'), '**Command failed** (exit 2)');
+  assert.equal(describeToolError('Edit', '<tool_use_error>Found 2 matches</tool_use_error>'), '**Edit failed:** <tool_use_error>Found 2 matches</tool_use_error>');
+});

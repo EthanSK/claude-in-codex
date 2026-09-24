@@ -283,7 +283,7 @@ export function handleEvent(ev, ctx, stream) {
         } else if (block.type === 'tool_use' || block.type === 'server_tool_use') {
           if (ctx.tools.has(block.id)) continue;
           const shown = describeToolUse(block, ctx.cwd);
-          const entry = { name: block.name };
+          const entry = { name: block.name, description: block.input?.description };
           ctx.tools.set(block.id, entry);
           if (!shown) continue;
           if (shown.kind === 'web') entry.web = stream.webSearchStart(shown.action);
@@ -305,7 +305,7 @@ export function handleEvent(ev, ctx, stream) {
           entry.web = null;
         }
         if (block.is_error && entry.name !== 'ExitPlanMode') {
-          stream.reasoning(describeToolError(entry.name, block.content));
+          stream.reasoning(describeToolError(entry.name, block.content, entry.description));
         }
       }
       return;

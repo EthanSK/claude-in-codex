@@ -98,10 +98,21 @@ export function describeToolUse(block, cwd) {
   }
 }
 
-export function describeToolError(name, content) {
+export function describeToolError(name, content, description) {
   let text = content;
   if (Array.isArray(content)) text = content.map((c) => c?.text || '').join('\n');
   text = String(text ?? '').trim();
-  const first = text.split('\n').find((l) => l.trim()) || 'failed';
+  const nonEmpty = text.split('\n').filter((l) => l.trim());
+  // Claude Code reports a non-zero shell exit as "Exit code N" followed by the command's output.
+  // That first line alone ("Bash failed: Exit code 1") says nothing, so name the command the same
+  // way the Running line did and show the output's last line, which is usually the actual error
+  // (e.g. "could not create image from display").
+  const exit = name === 'Bash' && nonEmpty[0]?.match(/^Exit code (\d+)$/);
+  if (exit) {
+    const head = description ? `**Failed:** ${short(description, 100)}` : '**Command failed**';
+    const last = nonEmpty.length > 1 ? `\n\n${fence(short(nonEmpty[nonEmpty.length - 1], 220))}` : '';
+    return `${head} (exit ${exit[1]})${last}`;
+  }
+  const first = nonEmpty[0] || 'failed';
   return `**${name || 'Tool'} failed:** ${short(first, 220)}`;
 }
