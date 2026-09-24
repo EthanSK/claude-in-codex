@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import http from 'node:http';
+import https from 'node:https';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import fs from 'node:fs';
@@ -224,6 +225,64 @@ export function createBridge(config = loadConfig(), state = new State()) {
     return null;
   }
 
+  function rejectWebSocket(socket, status = '426 Upgrade Required') {
+    socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  }
+
+  function proxyWebSocket(req, socket, head) {
+    const denied = localOnly(req);
+    if (denied) return rejectWebSocket(socket, '403 Forbidden');
+    const url = new URL(req.url, 'http://127.0.0.1');
+    if (url.pathname !== `${BASE_PATH}/responses`) return rejectWebSocket(socket, '404 Not Found');
+
+    // Codex 0.155+ names the model before the upgrade. Older clients omit this
+    // hint, so keep their known-good HTTP fallback instead of guessing a route.
+    const model = String(req.headers['x-codex-routing-hint'] || '').match(/(?:^|;)\s*model=([\w.-]+)/)?.[1];
+    if (!model || isClaude(model)) return rejectWebSocket(socket);
+
+    const target = new URL(`${config.upstream}/responses${url.search}`);
+    const headers = { ...req.headers };
+    delete headers.host;
+    socket.pause();
+    const request = (target.protocol === 'https:' ? https : http).request(target, {
+      method: 'GET',
+      headers,
+    });
+    let upstreamSocket;
+    const fail = (status) => {
+      if (!socket.destroyed && !upstreamSocket) rejectWebSocket(socket, status);
+    };
+    request.on('upgrade', (response, connectedSocket, upstreamHead) => {
+      upstreamSocket = connectedSocket;
+      log.info(`proxied GPT websocket model=${model}`);
+      const responseHeaders = [];
+      for (let i = 0; i < response.rawHeaders.length; i += 2) {
+        responseHeaders.push(`${response.rawHeaders[i]}: ${response.rawHeaders[i + 1]}`);
+      }
+      socket.write(`HTTP/1.1 101 Switching Protocols\r\n${responseHeaders.join('\r\n')}\r\n\r\n`);
+      if (upstreamHead.length) socket.write(upstreamHead);
+      if (head.length) connectedSocket.write(head);
+      socket.pipe(connectedSocket).pipe(socket);
+      socket.resume();
+      socket.on('end', () => connectedSocket.destroy());
+      socket.on('close', () => connectedSocket.destroy());
+      connectedSocket.on('end', () => socket.destroy());
+      connectedSocket.on('close', () => socket.destroy());
+      connectedSocket.on('error', () => socket.destroy());
+    });
+    request.on('response', (response) => {
+      response.resume();
+      fail(`${response.statusCode} ${response.statusMessage}`);
+    });
+    request.on('error', (error) => {
+      log.error(`GPT websocket upstream failed: ${error.message}`);
+      fail('502 Bad Gateway');
+    });
+    socket.on('close', () => request.destroy());
+    socket.on('error', () => request.destroy());
+    request.end();
+  }
+
   async function handle(req, res) {
     const denied = localOnly(req);
     if (denied) {
@@ -305,10 +364,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
     });
   });
 
-  // Codex tries Responses-over-WebSocket first; 426 makes it switch to HTTP at once.
-  server.on('upgrade', (req, socket) => {
-    socket.end('HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-  });
+  server.on('upgrade', proxyWebSocket);
 
   server.requestTimeout = 0;
   server.headersTimeout = 60000;
@@ -334,6 +390,13 @@ if (isMain) {
   server.on('request', (req, res) => {
     active++;
     res.on('close', () => {
+      active--;
+      if (reloadPending && active === 0) process.exit(0);
+    });
+  });
+  server.on('upgrade', (_req, socket) => {
+    active++;
+    socket.on('close', () => {
       active--;
       if (reloadPending && active === 0) process.exit(0);
     });

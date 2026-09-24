@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -22,6 +23,7 @@ const { State } = await import('../src/state.js');
 
 let upstream;
 let upstreamRequests = [];
+let upstreamUpgradeRequests = [];
 let bridge;
 let port;
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-work-'));
@@ -58,6 +60,14 @@ before(async () => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.end('event: response.completed\ndata: {"type":"response.completed","response":{"id":"r1"}}\n\n');
     });
+  });
+  upstream.on('upgrade', (req, socket) => {
+    upstreamUpgradeRequests.push({ url: req.url, headers: req.headers });
+    const accept = crypto.createHash('sha1')
+      .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest('base64');
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    socket.on('data', () => socket.write(Buffer.from([0x81, 0x02, 0x4f, 0x4b])));
   });
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
   const config = {
@@ -367,7 +377,7 @@ test('compaction of a Claude thread runs /compact and returns one compaction ite
   assert.equal(JSON.parse(last.stdin).message.content[0].text, 'after');
 });
 
-test('websocket upgrade gets 426 so Codex falls back to HTTP', async () => {
+test('websocket upgrade without a model hint gets 426 so older Codex falls back to HTTP', async () => {
   const res = await new Promise((resolve) => {
     const s = net.connect(port, '127.0.0.1', () => {
       s.write('GET /backend-api/codex/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n');
@@ -377,6 +387,61 @@ test('websocket upgrade gets 426 so Codex falls back to HTTP', async () => {
     s.on('end', () => resolve(d));
   });
   assert.match(res, /^HTTP\/1.1 426/);
+});
+
+test('Claude websocket upgrade gets 426 so Claude keeps using HTTP', async () => {
+  const res = await new Promise((resolve) => {
+    const s = net.connect(port, '127.0.0.1', () => {
+      s.write('GET /backend-api/codex/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nx-codex-routing-hint: model=claude-opus-5-5\r\n\r\n');
+    });
+    let data = '';
+    s.on('data', (chunk) => (data += chunk));
+    s.on('end', () => resolve(data));
+  });
+  assert.match(res, /^HTTP\/1.1 426/);
+});
+
+test('GPT websocket traffic and auth pass through to upstream', async () => {
+  upstreamUpgradeRequests = [];
+  const reply = await new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.write('GET /backend-api/codex/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nx-codex-routing-hint: model=gpt-6-sol;tier=priority\r\nAuthorization: Bearer test\r\n\r\n');
+    });
+    let data = Buffer.alloc(0);
+    let handshake = false;
+    socket.on('data', (chunk) => {
+      data = Buffer.concat([data, chunk]);
+      if (!handshake) {
+        const boundary = data.indexOf('\r\n\r\n');
+        if (boundary < 0) return;
+        assert.match(data.subarray(0, boundary).toString(), /^HTTP\/1\.1 101/);
+        data = data.subarray(boundary + 4);
+        handshake = true;
+        socket.write(Buffer.from([0x81, 0x80, 0, 0, 0, 0]));
+      }
+      if (data.length >= 4) {
+        socket.destroy();
+        resolve(data);
+      }
+    });
+    socket.on('error', reject);
+  });
+  assert.deepEqual(reply, Buffer.from([0x81, 0x02, 0x4f, 0x4b]));
+  assert.equal(upstreamUpgradeRequests.length, 1);
+  assert.equal(upstreamUpgradeRequests[0].url, '/backend-api/codex/responses');
+  assert.equal(upstreamUpgradeRequests[0].headers.authorization, 'Bearer test');
+});
+
+test('browser origins cannot open a GPT websocket through the bridge', async () => {
+  const reply = await new Promise((resolve) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.write('GET /backend-api/codex/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nx-codex-routing-hint: model=gpt-6-sol\r\nOrigin: https://evil.example\r\n\r\n');
+    });
+    let data = '';
+    socket.on('data', (chunk) => (data += chunk));
+    socket.on('end', () => resolve(data));
+  });
+  assert.match(reply, /^HTTP\/1\.1 403/);
 });
 
 test('rejects browser-origin requests', async () => {
