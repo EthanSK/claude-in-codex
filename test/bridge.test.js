@@ -26,6 +26,8 @@ const { mergeCatalog } = await import('../src/catalog.js');
 let upstream;
 let upstreamRequests = [];
 let upstreamUpgradeRequests = [];
+// Raw bytes the bridge wrote to the fake upstream over WebSocket (decode with decodeClientTextFrames).
+let upstreamWsData = Buffer.alloc(0);
 let bridge;
 let port;
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-work-'));
@@ -69,7 +71,10 @@ before(async () => {
       .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
       .digest('base64');
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
-    socket.on('data', () => socket.write(Buffer.from([0x81, 0x02, 0x4f, 0x4b])));
+    socket.on('data', (chunk) => {
+      upstreamWsData = Buffer.concat([upstreamWsData, chunk]);
+      socket.write(Buffer.from([0x81, 0x02, 0x4f, 0x4b]));
+    });
   });
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
   const config = {
@@ -143,6 +148,33 @@ function responsesBody(model, input, extra = {}) {
 }
 
 const readClaudeLog = () => fs.readFileSync(claudeLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+
+// Decodes the masked client-to-server text frames the bridge sent to the fake
+// upstream. The fake never agrees to permessage-deflate, so payloads are plain.
+function decodeClientTextFrames(buf) {
+  const texts = [];
+  let i = 0;
+  while (i + 2 <= buf.length) {
+    const opcode = buf[i] & 0x0f;
+    let len = buf[i + 1] & 0x7f;
+    let off = i + 2;
+    if (len === 126) {
+      len = buf.readUInt16BE(off);
+      off += 2;
+    } else if (len === 127) {
+      len = Number(buf.readBigUInt64BE(off));
+      off += 8;
+    }
+    const mask = buf.subarray(off, off + 4);
+    off += 4;
+    if (off + len > buf.length) break;
+    const payload = Buffer.alloc(len);
+    for (let k = 0; k < len; k++) payload[k] = buf[off + k] ^ mask[k % 4];
+    if (opcode === 0x1) texts.push(payload.toString('utf8'));
+    i = off + len;
+  }
+  return texts;
+}
 
 test('model catalog adds Claude models after GPT', async () => {
   const r = await request('/backend-api/codex/models?client_version=1.0', { method: 'GET' });
@@ -557,6 +589,51 @@ test('an Opus side-chat turn on a GPT-prewarmed websocket goes to Claude', async
       socket.once('error', reject);
     });
     assert.equal(resumedGpt, 'OK');
+  } finally {
+    socket.close();
+  }
+});
+
+test('GPT websocket frames drop bridge-only items, so a side chat off a Claude-compacted thread works', async () => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`, {
+    headers: { 'x-codex-routing-hint': 'model=gpt-6-sol', authorization: 'Bearer test' },
+  });
+  await new Promise((resolve, reject) => {
+    socket.once('open', resolve);
+    socket.once('error', reject);
+  });
+  const nextReply = () => new Promise((resolve, reject) => {
+    socket.once('message', (data) => resolve(data.toString()));
+    socket.once('error', reject);
+  });
+  try {
+    // A GPT side chat forked from an Opus thread inherits the bridge's compaction
+    // marker and Claude's messages. OpenAI rejects the marker as unverifiable.
+    upstreamWsData = Buffer.alloc(0);
+    socket.send(JSON.stringify({
+      type: 'response.create',
+      model: 'gpt-6-sol',
+      input: [
+        { id: 'cmp_ccb_1', type: 'compaction', encrypted_content: 'ccb:v1:s:t' },
+        { id: 'msg_ccb_1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'claude said' }] },
+        userMsg('side question'),
+      ],
+    }));
+    assert.equal(await nextReply(), 'OK');
+    const fwd = JSON.parse(decodeClientTextFrames(upstreamWsData).at(-1));
+    assert.doesNotMatch(JSON.stringify(fwd), /ccb/, 'no bridge ids or markers reach OpenAI');
+    assert.equal(fwd.input.length, 3);
+    assert.match(fwd.input[0].content[0].text, /handled by Claude and then compacted/);
+    assert.equal(fwd.input[1].id, undefined);
+    assert.equal(fwd.input[1].content[0].text, 'claude said');
+    assert.equal(fwd.input[2].content[0].text, 'side question');
+
+    // Frames without bridge items are forwarded unchanged.
+    upstreamWsData = Buffer.alloc(0);
+    const clean = JSON.stringify({ type: 'response.create', model: 'gpt-6-sol', input: [userMsg('plain')] });
+    socket.send(clean);
+    assert.equal(await nextReply(), 'OK');
+    assert.deepEqual(decodeClientTextFrames(upstreamWsData), [clean]);
   } finally {
     socket.close();
   }

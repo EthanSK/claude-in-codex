@@ -159,6 +159,7 @@ Code changes in `src/` are picked up automatically once every request and WebSoc
 - **Claude is selected but GPT answers.** Update the bridge (`git pull`); Codex's request format changes between versions. Then check the log for `claude turn model=…` lines.
 - **"Claude Code stopped: …" in a reply.** That's Claude Code's own error (auth, usage limit, unknown model name). Run the same model in a terminal with `claude -p --model <name> "hi"` to see it directly.
 - **An Opus side chat stays on Thinking or says the model is unsupported with a ChatGPT account.** Update and reinstall the bridge, then verify the service has restarted. Codex can start a side chat with an Opus WebSocket or prewarm one over a GPT WebSocket and send Opus on that same connection. Older bridge versions rejected the first route or forwarded the second to OpenAI. The bridge now accepts Claude WebSockets and routes each message by its model. If the error persists, compare its timestamp with `local Claude websocket`, `proxied GPT websocket`, and `claude turn` in the bridge log.
+- **A GPT side chat of a Claude thread reports that encrypted content could not be verified.** If the item ID starts with `cmp_ccb_`, `msg_ccb_`, `rs_ccb_`, or `ws_ccb_`, update the bridge and verify the service has restarted. Those items were created by the bridge; older versions could forward them to OpenAI when GPT used a WebSocket. The bridge now removes or translates them on GPT's HTTP and WebSocket routes.
 - **Logs:** `tail -f ~/Library/Logs/codex-claude-bridge.log`
 
 ## Limits

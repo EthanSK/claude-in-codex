@@ -268,7 +268,22 @@ export function createBridge(config = loadConfig(), state = new State()) {
     let body;
     try { body = isBinary ? null : JSON.parse(data.toString()); } catch { body = null; }
     const modelCfg = claudeSlugs.get(body?.model);
-    if (!modelCfg) return forwardGpt(data, isBinary);
+    if (!modelCfg) {
+      // GPT frame. Strip bridge-minted items first, exactly like the HTTP path in
+      // handle() does. Bug fixed 2026-09-24: this path used to forward frames
+      // untouched, so a GPT side chat forked from an Opus thread that Claude had
+      // compacted sent our `cmp_ccb_…` compaction marker to OpenAI, which failed
+      // with "The encrypted content for item cmp_ccb_… could not be verified".
+      // Clean frames (the normal case) are still forwarded byte-for-byte.
+      if (Array.isArray(body?.input)) {
+        const s = sanitizeInputForOpenAI(body.input);
+        if (s.changed) {
+          body.input = s.input;
+          return forwardGpt(JSON.stringify(body), false);
+        }
+      }
+      return forwardGpt(data, isBinary);
+    }
     if (body.generate === false) {
       const stream = new ResponsesStream(new WebSocketResponse(client), { model: body.model });
       stream.begin();

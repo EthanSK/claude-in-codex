@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-24T15:45:00Z
+**Trigger:** A normal GPT side chat failed right after "Context automatically compacted"
+**Symptom:** Codex desktop showed `The encrypted content for item cmp_ccb_… could not be verified. Reason: Encrypted content could not be decrypted or parsed.` in a GPT-6 Sol side chat of an Opus thread.
+**Root cause:** `cmp_ccb_` items are the bridge's own Claude compaction markers (`ResponsesStream.compaction`). The HTTP GPT path strips bridge items with `sanitizeInputForOpenAI`, but `routeWebSocketMessage` forwarded GPT frames untouched, so a side chat that inherited the parent's Claude compaction sent the marker to OpenAI over WebSocket.
+**Fix:** `src/server.js` `routeWebSocketMessage` now sanitizes GPT frames' `input` the same way; clean frames are still forwarded byte-for-byte.
+**Guard:** `test/bridge.test.js` sends a GPT WebSocket frame containing `cmp_ccb_`/`msg_ccb_` items and asserts no bridge ids or markers reach the upstream, and that clean frames pass unchanged. Any new GPT-bound path must call `sanitizeInputForOpenAI`.
+---
+
+---
 **Date:** 2026-09-24T15:30:00Z
 **Trigger:** A fresh Opus side chat still did not start after the GPT-prewarmed WebSocket fix
 **Symptom:** Codex's `queued_side_chat` turn selected `claude-opus-5-5`, but the bridge logged no Claude turn; the Codex trace reported `websocket reuse properties didn't match`.
