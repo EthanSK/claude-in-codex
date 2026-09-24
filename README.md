@@ -50,6 +50,10 @@ The installer:
 
 **Uninstall:** `./scripts/uninstall.sh` stops the service and removes that line. Restart Codex afterwards.
 
+### Optional model bar
+
+[Codex Model Bar](https://github.com/EthanSK/codex-model-bar) is a separate macOS companion app with one button per model below the Codex window. It reads Codex's model list, so the Claude models supplied by this bridge appear alongside GPT models. The bar switches the open task through Codex's own `/model` menu. The bridge works without it; the bar's repository has its own source-build and Accessibility setup instructions.
+
 On macOS, `RunAtLoad` and `KeepAlive` in `~/Library/LaunchAgents/com.codex-claude-bridge.plist` start the bridge when you log in and restart it after an exit. Check registration with `launchctl print gui/$(id -u)/com.codex-claude-bridge` and check the listener with `curl http://127.0.0.1:18787/health`. This reduces interruptions, but it cannot cover a failed login, a missing Node installation, a port conflict, or other system failures.
 
 ## What you get
