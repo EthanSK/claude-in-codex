@@ -126,10 +126,10 @@ test('model catalog adds Claude models after GPT', async () => {
   const r = await request('/backend-api/codex/models?client_version=1.0', { method: 'GET' });
   assert.equal(r.status, 200);
   const { models } = JSON.parse(r.data);
-  assert.deepEqual(models.map((m) => m.slug), ['gpt-6-sol', 'claude-opus-5-5', 'claude-fable-5']);
+  assert.deepEqual(models.map((m) => m.slug), ['gpt-6-sol', 'claude-opus-5-5', 'claude-fable-5-1']);
   const opus = models[1];
   assert.equal(opus.display_name, 'Opus 5.5');
-  assert.equal(models[2].display_name, 'Fable 5', 'picker names always include the model version');
+  assert.equal(models[2].display_name, 'Fable 5.1', 'picker names always include the model version');
   assert.equal(opus.comp_hash, 'abc', 'keeps comp_hash so switching models does not force compaction');
   assert.equal(opus.guardian, undefined);
   assert.ok(opus.priority > 1);
@@ -190,15 +190,15 @@ test('Claude turn streams text, reasoning, web search and a marker; second turn 
 test('rollback to an earlier point starts a fresh session with the transcript', async () => {
   fs.rmSync(claudeLog, { force: true });
   const input1 = [envContext(workdir), userMsg('first')];
-  const r1 = await request('/backend-api/codex/responses', { body: responsesBody('claude-fable-5', input1), headers: { 'content-type': 'application/json' } });
+  const r1 = await request('/backend-api/codex/responses', { body: responsesBody('claude-fable-5-1', input1), headers: { 'content-type': 'application/json' } });
   const out1 = parseSse(r1.data).filter((e) => e.type === 'response.output_item.done').map((e) => e.item);
   const input2 = [...input1, ...out1, userMsg('second')];
-  const r2 = await request('/backend-api/codex/responses', { body: responsesBody('claude-fable-5', input2), headers: { 'content-type': 'application/json' } });
+  const r2 = await request('/backend-api/codex/responses', { body: responsesBody('claude-fable-5-1', input2), headers: { 'content-type': 'application/json' } });
   const out2 = parseSse(r2.data).filter((e) => e.type === 'response.output_item.done').map((e) => e.item);
   assert.ok(out2.length);
   // User edits "second" -> Codex drops turn 2 and sends turn 1 history + edited prompt.
   const input3 = [...input1, ...out1, userMsg('second, edited')];
-  await request('/backend-api/codex/responses', { body: responsesBody('claude-fable-5', input3), headers: { 'content-type': 'application/json' } });
+  await request('/backend-api/codex/responses', { body: responsesBody('claude-fable-5-1', input3), headers: { 'content-type': 'application/json' } });
   const calls = readClaudeLog();
   assert.equal(calls.length, 3);
   assert.ok(calls[1].args.includes('--resume'));

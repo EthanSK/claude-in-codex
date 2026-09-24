@@ -52,7 +52,7 @@ The installer:
 
 | In Codex | In Claude Code |
 |---|---|
-| Model picker entry (default: Opus 5.5, Fable 5) | `claude --model …` |
+| Model picker entry (default: Opus 5.5, Fable 5.1) | `claude --model …` |
 | Reasoning effort | `--effort` (low … max) |
 | Full access / workspace-write / read-only | `bypassPermissions` / `acceptEdits` / `dontAsk` |
 | Plan mode | `--permission-mode plan`; the plan comes back as Codex's plan card |
@@ -86,7 +86,7 @@ Codex housekeeping requests made while a Claude model is selected, such as threa
   "claudePath": "/Users/you/.local/bin/claude",
   "models": [
     { "slug": "claude-opus-5-5", "displayName": "Opus 5.5", "claudeModel": "claude-opus-5-5" },
-    { "slug": "claude-fable-5", "displayName": "Fable 5", "claudeModel": "claude-fable-5" },
+    { "slug": "claude-fable-5-1", "displayName": "Fable 5.1", "claudeModel": "claude-fable-5-1" },
     { "slug": "claude-sonnet-5", "displayName": "Sonnet 5", "claudeModel": "claude-sonnet-5" }
   ],
   "permissionModes": { "workspace-write": "auto" },
