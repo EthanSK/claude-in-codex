@@ -156,6 +156,8 @@ Code changes in `src/` are picked up automatically: the service restarts itself 
 - Claude's tool calls don't go through Codex's approval prompts. Permissions come from the mapping above.
 - GPT requests use Codex's HTTP streaming transport instead of its WebSocket transport. They behave the same, with slightly more overhead per turn.
 - This depends on Codex's internal request format, which can change with Codex updates. The tests pin the shapes the bridge relies on.
+- All of Codex's model requests go through the bridge, GPT included. If the service isn't running, GPT stops working in Codex too. `./scripts/uninstall.sh` sends Codex straight to OpenAI again.
+- Codex's memories and its desktop-app instructions aren't passed to Claude. Claude Code's own memory still applies.
 
 ## Other platforms
 
@@ -172,6 +174,8 @@ The bridge is an OpenAI Responses API endpoint on localhost:
 - **`GET /models`** fetches Codex's normal model catalog and adds the Claude models.
 - **`POST /responses` with a GPT model** is forwarded to OpenAI untouched, apart from removing bridge-only items from the history.
 - **`POST /responses` with a Claude model** runs `claude -p --input-format stream-json --output-format stream-json --resume <session>` and translates Claude Code's events into the Responses events Codex renders: text, reasoning summaries, web search calls and plan blocks. An invisible marker in each reply ties a Codex chat to its Claude session.
+
+It only accepts requests from this Mac. It refuses requests from web pages (anything with a browser `Origin` header) and requests with an unexpected `Host`, so a website can't use it to run Claude.
 
 ## Development
 
