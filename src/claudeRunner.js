@@ -112,7 +112,10 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     if (caps.effort && effortLevel) args.push('--effort', effortLevel);
     if (parsed.resume) args.push('--resume', parsed.resume.sid);
     if (parsed.fork) args.push('--fork-session');
-    const system = [BRIDGE_NOTE, config.extraSystemPrompt, ...parsed.agentsMd].filter(Boolean).join('\n\n');
+    const skills = parsed.skills
+      ? `The user's Codex skills are listed below. They are in addition to your own Claude Code skills. When a task matches one, read its SKILL.md with the Read tool and follow it, exactly as you would one of your own skills. When the user names a skill (e.g. $name), use it.\n\n${parsed.skills}`
+      : '';
+    const system = [BRIDGE_NOTE, config.extraSystemPrompt, ...parsed.agentsMd, skills].filter(Boolean).join('\n\n');
     args.push('--append-system-prompt', system);
 
     log.info(

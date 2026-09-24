@@ -378,3 +378,17 @@ test('side chat (different thread) forks the parent Claude session; parent keeps
   assert.ok(!calls[2].args.includes('--fork-session'));
   assert.equal(calls[2].args[calls[2].args.indexOf('--resume') + 1], parentSid);
 });
+
+test('Codex skills catalog is passed to Claude', async () => {
+  fs.rmSync(claudeLog, { force: true });
+  const dev = {
+    type: 'message',
+    role: 'developer',
+    content: [{ type: 'input_text', text: '<skills_instructions>\n## Skills\n- write-user-facing-messages: Write UI text (file: r0/write-user-facing-messages/SKILL.md)\n</skills_instructions>' }],
+  };
+  await request('/backend-api/codex/responses', { body: responsesBody('claude-opus-5-5', [dev, envContext(workdir), userMsg('x')]), headers: { 'content-type': 'application/json' } });
+  const call = readClaudeLog()[0];
+  const system = call.args[call.args.indexOf('--append-system-prompt') + 1];
+  assert.match(system, /write-user-facing-messages/);
+  assert.match(system, /read its SKILL\.md/);
+});

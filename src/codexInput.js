@@ -162,6 +162,7 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
   let agentsMd = [];
   let marker = null;
   let hasCompactionTrigger = false;
+  let skills = null;
 
   input.forEach((item, index) => {
     if (item?.type === 'compaction_trigger') hasCompactionTrigger = true;
@@ -181,6 +182,9 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
         }
       }
       if (role === 'developer' || role === 'system') {
+        // Codex's skill catalog (names, descriptions, SKILL.md paths): hand it to Claude too.
+        const sk = text.match(/<skills_instructions>[\s\S]*?<\/skills_instructions>/);
+        if (sk) skills = sk[0];
         const sm = lastMatch(text, /`sandbox_mode` is `([a-z-]+)`/g);
         if (sm) sandboxMode = sm[1];
         const collab = lastMatch(text, /<collaboration_mode>([\s\S]*?)<\/collaboration_mode>/g);
@@ -244,6 +248,7 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
     marker,
     resume,
     hasCompactionTrigger,
+    skills,
     context,
     promptText: promptTexts.join('\n\n'),
     images,
