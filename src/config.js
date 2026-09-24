@@ -9,6 +9,39 @@ export const BRIDGE_HOME =
 // which keeps every GPT feature (remote compaction, model catalog, etc.) on.
 export const BASE_PATH = '/backend-api/codex';
 
+// Reuse Codex's installed computer-use server only when the user enabled that plugin.
+export function findCodexComputerUseMcpConfig(codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex')) {
+  let enabled = false;
+  try {
+    let inPluginSection = false;
+    for (const line of fs.readFileSync(path.join(codexHome, 'config.toml'), 'utf8').split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('[')) {
+        inPluginSection = trimmed === '[plugins."unified-computer-use@openai-bundled"]';
+      } else if (inPluginSection && /^enabled\s*=\s*true(?:\s*(?:#.*)?)?$/.test(trimmed)) {
+        enabled = true;
+      } else if (inPluginSection && /^enabled\s*=\s*false(?:\s*(?:#.*)?)?$/.test(trimmed)) {
+        enabled = false;
+      }
+    }
+  } catch {
+    return null;
+  }
+  if (!enabled) return null;
+
+  const cache = path.join(codexHome, 'plugins', 'cache', 'openai-bundled', 'unified-computer-use');
+  try {
+    const versions = fs.readdirSync(cache).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+    for (const version of versions) {
+      const config = path.join(cache, version, '.mcp.json');
+      if (fs.existsSync(config)) return config;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 export const DEFAULTS = {
   host: '127.0.0.1',
   port: 18787,
@@ -47,6 +80,8 @@ export const DEFAULTS = {
   fallbackModel: null,
   // Extra text appended to Claude Code's system prompt for every bridged turn.
   extraSystemPrompt: '',
+  // Claude can use the same app-backed browser and desktop MCP server as Codex.
+  codexComputerUseMcpConfig: findCodexComputerUseMcpConfig(),
   // Seconds between keep-alive events while Claude works silently.
   keepAliveSeconds: 15,
   // Set to a directory to dump sanitized request bodies for debugging.

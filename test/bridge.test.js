@@ -6,6 +6,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { spawn } from 'node:child_process';
+import readline from 'node:readline';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-test-'));
 process.env.CODEX_CLAUDE_BRIDGE_HOME = tmp;
@@ -15,7 +17,7 @@ const claudeLog = path.join(tmp, 'claude.log');
 process.env.FAKE_CLAUDE_LOG = claudeLog;
 
 const { createBridge } = await import('../src/server.js');
-const { DEFAULTS } = await import('../src/config.js');
+const { DEFAULTS, findCodexComputerUseMcpConfig } = await import('../src/config.js');
 const { State } = await import('../src/state.js');
 
 let upstream;
@@ -23,6 +25,8 @@ let upstreamRequests = [];
 let bridge;
 let port;
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-work-'));
+const fakeMcpConfig = path.join(tmp, 'computer-use.json');
+fs.writeFileSync(fakeMcpConfig, '{}');
 
 const GPT_MODEL = {
   slug: 'gpt-6-sol',
@@ -61,6 +65,7 @@ before(async () => {
     port: 0,
     upstream: `http://127.0.0.1:${upstream.address().port}/backend-api/codex`,
     claudePath: fakeClaude,
+    codexComputerUseMcpConfig: fakeMcpConfig,
     keepAliveSeconds: 60,
     logLevel: 'error',
   };
@@ -114,6 +119,11 @@ const agents = {
   role: 'user',
   content: [{ type: 'input_text', text: '# AGENTS.md instructions\n\n<INSTRUCTIONS>\nBe terse.\n</INSTRUCTIONS>' }],
 };
+const memory = {
+  type: 'message',
+  role: 'developer',
+  content: [{ type: 'input_text', text: '## Memory\nRead memory when relevant.\n========= MEMORY_SUMMARY BEGINS =========\nRemember the project.\n========= MEMORY_SUMMARY ENDS =========' }],
+};
 const userMsg = (text) => ({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] });
 
 function responsesBody(model, input, extra = {}) {
@@ -140,7 +150,7 @@ test('model catalog adds Claude models after GPT', async () => {
 
 test('Claude turn streams text, reasoning, web search and a marker; second turn resumes', async () => {
   fs.rmSync(claudeLog, { force: true });
-  const input1 = [perms, agents, envContext(workdir), userMsg('fix the bug')];
+  const input1 = [perms, agents, memory, envContext(workdir), userMsg('fix the bug')];
   const r1 = await request('/backend-api/codex/responses', { body: responsesBody('claude-opus-5-5', input1), headers: { 'content-type': 'application/json' } });
   assert.equal(r1.status, 200);
   const ev = parseSse(r1.data);
@@ -174,6 +184,12 @@ test('Claude turn streams text, reasoning, web search and a marker; second turn 
   assert.deepEqual(call1.args.slice(call1.args.indexOf('--effort'), call1.args.indexOf('--effort') + 2), ['--effort', 'xhigh']);
   assert.ok(!call1.args.includes('--resume'));
   assert.ok(call1.args[call1.args.indexOf('--append-system-prompt') + 1].includes('Be terse.'));
+  assert.ok(call1.args[call1.args.indexOf('--append-system-prompt') + 1].includes('Remember the project.'));
+  const mcpConfig = JSON.parse(call1.args[call1.args.indexOf('--mcp-config') + 1]);
+  assert.equal(mcpConfig.mcpServers.cua_repl.env.CODEX_CUA_MCP_CONFIG_PATH, fakeMcpConfig);
+  assert.equal(mcpConfig.mcpServers.cua_repl.env.CODEX_CUA_MODEL, 'claude-opus-5-5');
+  assert.ok(mcpConfig.mcpServers.cua_repl.env.CODEX_CUA_SESSION_ID);
+  assert.ok(mcpConfig.mcpServers.cua_repl.env.CODEX_CUA_TURN_ID);
   const sent1 = JSON.parse(call1.stdin);
   assert.equal(sent1.message.content[0].text, 'fix the bug');
 
@@ -185,6 +201,44 @@ test('Claude turn streams text, reasoning, web search and a marker; second turn 
   assert.equal(call2.args[call2.args.indexOf('--resume') + 1], sid);
   assert.equal(JSON.parse(call2.stdin).message.content[0].text, 'now add a test');
 
+});
+
+test('computer-use config follows Codex plugin enablement', () => {
+  const codexRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-codex-'));
+  const pluginDir = path.join(codexRoot, 'plugins', 'cache', 'openai-bundled', 'unified-computer-use', '26.917.62051');
+  fs.mkdirSync(pluginDir, { recursive: true });
+  const mcpConfig = path.join(pluginDir, '.mcp.json');
+  fs.writeFileSync(mcpConfig, '{}');
+  fs.writeFileSync(path.join(codexRoot, 'config.toml'), '[plugins."unified-computer-use@openai-bundled"]\nenabled = true\n');
+  assert.equal(findCodexComputerUseMcpConfig(codexRoot), mcpConfig);
+  fs.writeFileSync(path.join(codexRoot, 'config.toml'), '[plugins."unified-computer-use@openai-bundled"]\nenabled = false\n');
+  assert.equal(findCodexComputerUseMcpConfig(codexRoot), null);
+  fs.rmSync(codexRoot, { recursive: true, force: true });
+});
+
+test('computer-use proxy adds Codex turn metadata to MCP tool calls', async () => {
+  const fakePluginConfig = path.join(tmp, 'fake-plugin.json');
+  fs.writeFileSync(fakePluginConfig, JSON.stringify({ mcpServers: { cua_repl: { command: process.execPath, args: [new URL('./fixtures/fake-mcp.js', import.meta.url).pathname], enabled_tools: ['js', 'turn_ended'] } } }));
+  const child = spawn(process.execPath, [new URL('../src/cuaMcpProxy.js', import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      CODEX_CUA_MCP_CONFIG_PATH: fakePluginConfig,
+      CODEX_CUA_SESSION_ID: 'thread-1',
+      CODEX_CUA_TURN_ID: 'turn-1',
+      CODEX_CUA_MODEL: 'claude-fable-5-1',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const responses = readline.createInterface({ input: child.stdout });
+  const nextResponse = () => new Promise((resolve) => responses.once('line', (line) => resolve(JSON.parse(line))));
+  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'tools/list', params: {} })}\n`);
+  assert.deepEqual((await nextResponse()).result.tools.map((tool) => tool.name), ['js']);
+  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'js', arguments: { code: 'await cua.getState()' } } })}\n`);
+  assert.deepEqual((await nextResponse()).result['x-codex-turn-metadata'], {
+    session_id: 'thread-1', turn_id: 'turn-1', model: 'claude-fable-5-1',
+  });
+  child.stdin.end();
+  await new Promise((resolve) => child.on('close', resolve));
 });
 
 test('rollback to an earlier point starts a fresh session with the transcript', async () => {

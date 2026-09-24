@@ -163,6 +163,7 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
   let marker = null;
   let hasCompactionTrigger = false;
   let skills = null;
+  let codexMemory = null;
 
   input.forEach((item, index) => {
     if (item?.type === 'compaction_trigger') hasCompactionTrigger = true;
@@ -185,6 +186,11 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
         // Codex's skill catalog (names, descriptions, SKILL.md paths): hand it to Claude too.
         const sk = text.match(/<skills_instructions>[\s\S]*?<\/skills_instructions>/);
         if (sk) skills = sk[0];
+        const memoryStart = text.indexOf('## Memory\n');
+        const memoryEnd = text.indexOf('========= MEMORY_SUMMARY ENDS =========', memoryStart);
+        if (memoryStart !== -1 && memoryEnd !== -1) {
+          codexMemory = text.slice(memoryStart, memoryEnd + '========= MEMORY_SUMMARY ENDS ========='.length);
+        }
         const sm = lastMatch(text, /`sandbox_mode` is `([a-z-]+)`/g);
         if (sm) sandboxMode = sm[1];
         const collab = lastMatch(text, /<collaboration_mode>([\s\S]*?)<\/collaboration_mode>/g);
@@ -249,6 +255,7 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
     resume,
     hasCompactionTrigger,
     skills,
+    codexMemory,
     context,
     promptText: promptTexts.join('\n\n'),
     images,

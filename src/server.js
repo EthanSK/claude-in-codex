@@ -166,6 +166,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
     // fork of the parent's Claude session instead of taking over the parent's session.
     const threadId = String(req.headers['thread-id'] || req.headers['session-id'] || body.prompt_cache_key || '') || null;
     parsed.threadId = threadId;
+    parsed.codexTurnId = String(req.headers['turn-id'] || req.headers['x-codex-turn-id'] || crypto.randomUUID());
     const owner = parsed.resume ? state.ownerThread(parsed.resume.sid) : null;
     parsed.fork = Boolean(parsed.resume && owner && threadId && owner !== threadId);
     const stream = new ResponsesStream(res, { model: body.model });

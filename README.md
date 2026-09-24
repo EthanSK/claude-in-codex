@@ -1,10 +1,11 @@
 # claude-in-codex
 
-**Use Claude models inside the OpenAI Codex app.** Claude models appear in Codex's model picker next to GPT. Pick one, and that chat runs on your own **Claude Code CLI**, covered by your Claude subscription. GPT keeps working exactly as before.
+**Use Claude models inside the OpenAI Codex app.** Claude models appear in Codex's model picker next to GPT. Pick one, and that chat runs on your own **Claude Code CLI**, covered by your Claude subscription. GPT requests still use your ChatGPT login, but pass through the local bridge.
 
 ```
-Codex app ──► 127.0.0.1:18787 ──┬─ GPT model    → chatgpt.com, unchanged (your ChatGPT login)
+Codex app ──► 127.0.0.1:18787 ──┬─ GPT model    → chatgpt.com over HTTP (your ChatGPT login)
                                 └─ Claude model → `claude -p` in the chat's project folder (your Claude login)
+                                                   └─ Codex Computer Use MCP, if enabled
 ```
 
 **How it works, in short:**
@@ -59,6 +60,8 @@ The installer:
 | Chat's project folder | working directory |
 | AGENTS.md, including your global one | appended to Claude's system prompt |
 | Your Codex skills | listed for Claude, which reads a SKILL.md when a task matches |
+| Codex memory block | included in Claude's system prompt when Codex sends it |
+| Codex Computer Use plugin | its installed MCP server is available to Claude for desktop and browser tasks when enabled |
 | Each chat | its own Claude session (`--resume`) |
 | Side chats and forked chats | their own fork of the parent's session (`--fork-session`) |
 | Compact (auto or `/compact`) | Claude Code's `/compact` |
@@ -76,9 +79,9 @@ Codex housekeeping requests made while a Claude model is selected, such as threa
 
 ### Claude runs as Claude Code, not as a model inside Codex's agent
 
-Claude uses Claude Code's own tools (shell, file edits, subagents, …), plus the CLAUDE.md, memory, skills and MCP servers from your Claude Code setup. From Codex it gets your AGENTS.md, your Codex skills list, the chat's folder, the permission mode and the chat so far. That's why your AGENTS.md rules and Codex skills still apply.
+Claude uses Claude Code's own tools (shell, file edits, subagents, …), plus the CLAUDE.md, memory, skills and MCP servers from your Claude Code setup. From Codex it gets your AGENTS.md, your Codex skills list and memory block, the chat's folder, the permission mode and the chat so far. That's why your AGENTS.md rules and Codex skills still apply. Claude Code records its system prompt when a session starts, so a later change to Codex memory may need a new Claude session or compaction to take effect.
 
-Codex's own plugins (Computer Use, for example) and MCP servers you've only set up in Codex aren't available to Claude. To give Claude an MCP server, add it to Claude Code too (`claude mcp add …`).
+If Codex's bundled **Computer Use** plugin is enabled in your user config, the bridge finds its installed MCP configuration and gives Claude direct access to the same app-backed desktop and browser service. The service starts a fresh MCP connection for each Claude turn; Claude can inspect existing browser windows again on the next turn. Claude's permission mode still controls tool use. Other Codex-only plugins and task tools are not automatically shared. To give Claude a separate MCP server, add it to Claude Code too (`claude mcp add …`).
 
 ### Switching models mid-chat
 
@@ -134,6 +137,7 @@ For long chats, stick mainly to one model and switch for second opinions.
 - `models`: what appears in the picker. `claudeModel` is anything `claude --model` accepts (an alias or a full model name). Put the version in `displayName` (e.g. "Sonnet 5") so the picker shows exactly which model you get.
 - `permissionModes`: maps Codex's sandbox mode to a Claude Code permission mode.
 - `fallbackModel`: the GPT model that answers housekeeping requests.
+- `codexComputerUseMcpConfig`: found automatically when Codex's bundled Computer Use plugin is explicitly enabled. Set it to `null` to disable sharing or to a `.mcp.json` path to override discovery.
 
 After changing the config, restart the service, then restart Codex so it reloads the model list:
 
@@ -154,10 +158,15 @@ Code changes in `src/` are picked up automatically: the service restarts itself 
 ## Limits
 
 - Claude's tool calls don't go through Codex's approval prompts. Permissions come from the mapping above.
-- GPT requests use Codex's HTTP streaming transport instead of its WebSocket transport. They behave the same, with slightly more overhead per turn.
+- GPT requests use Codex's HTTP streaming transport instead of its WebSocket transport. This adds a local hop and transport fallback; the speed difference has not been measured.
+- The Computer Use MCP server runs through Claude Code's tool permissions, not Codex's own tool approval prompts. Its browser and desktop actions are available, but this does not give Claude every Codex app tool.
 - This depends on Codex's internal request format, which can change with Codex updates. The tests pin the shapes the bridge relies on.
 - All of Codex's model requests go through the bridge, GPT included. If the service isn't running, GPT stops working in Codex too. `./scripts/uninstall.sh` sends Codex straight to OpenAI again.
-- Codex's memories and its desktop-app instructions aren't passed to Claude. Claude Code's own memory still applies.
+- Codex's desktop-app instructions aren't passed to Claude. Claude Code's own memory still applies alongside the Codex memory block when one is supplied.
+
+### Can GPT bypass the bridge?
+
+Not while keeping Claude and GPT in this same model picker with this configuration. Codex's `openai_base_url` changes the base URL of the built-in OpenAI provider for every model request. The bridge therefore receives GPT requests too. [Codex documents this setting](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers) for local or hosted model proxies, routers and data-residency endpoints; the bridge uses that routing ability to add Claude models to the normal catalog. Remove the `openai_base_url` line (or run `./scripts/uninstall.sh`) and restart Codex to restore its direct GPT transport; the Claude picker entries then disappear. A future Codex feature for per-model provider routing could remove this trade-off.
 
 ## Other platforms
 

@@ -2,6 +2,7 @@ import { spawn, execFile } from 'node:child_process';
 import os from 'node:os';
 import fs from 'node:fs';
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
 import { rid, usageObject } from './responsesStream.js';
 import { makeMarker } from './codexInput.js';
 import { describeToolUse, describeToolError } from './toolDisplay.js';
@@ -115,8 +116,27 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     const skills = parsed.skills
       ? `The user's Codex skills are listed below. They are in addition to your own Claude Code skills. When a task matches one, read its SKILL.md with the Read tool and follow it, exactly as you would one of your own skills. When the user names a skill (e.g. $name), use it.\n\n${parsed.skills}`
       : '';
-    const system = [BRIDGE_NOTE, config.extraSystemPrompt, ...parsed.agentsMd, skills].filter(Boolean).join('\n\n');
+    const system = [BRIDGE_NOTE, config.extraSystemPrompt, ...parsed.agentsMd, skills, parsed.codexMemory]
+      .filter(Boolean)
+      .join('\n\n');
     args.push('--append-system-prompt', system);
+    if (config.codexComputerUseMcpConfig) {
+      const mcpConfig = {
+        mcpServers: {
+          cua_repl: {
+            command: process.execPath,
+            args: [fileURLToPath(new URL('./cuaMcpProxy.js', import.meta.url))],
+            env: {
+              CODEX_CUA_MCP_CONFIG_PATH: config.codexComputerUseMcpConfig,
+              CODEX_CUA_SESSION_ID: parsed.threadId || rid('ccb_session_'),
+              CODEX_CUA_TURN_ID: parsed.codexTurnId || rid('ccb_turn_'),
+              CODEX_CUA_MODEL: modelCfg.claudeModel,
+            },
+          },
+        },
+      };
+      args.push('--mcp-config', JSON.stringify(mcpConfig));
+    }
 
     log.info(
       `claude turn model=${modelCfg.claudeModel} mode=${permissionMode} effort=${effortLevel || '-'} cwd=${cwd} ${
