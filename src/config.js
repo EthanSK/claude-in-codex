@@ -17,6 +17,8 @@ export const DEFAULTS = {
   // Absolute path is best when running under launchd (PATH is minimal there).
   claudePath: 'claude',
   // Models added to Codex's picker. `claudeModel` is passed to `claude --model`.
+  // Every displayName includes the model version (e.g. "Fable 5", not "Fable"), so
+  // the picker always shows exactly which model a chat runs on.
   models: [
     {
       slug: 'claude-opus-5-5',
@@ -26,9 +28,9 @@ export const DEFAULTS = {
     },
     {
       slug: 'claude-fable-5',
-      displayName: 'Fable',
+      displayName: 'Fable 5',
       claudeModel: 'claude-fable-5',
-      description: 'Claude Fable, running through your Claude Code CLI.',
+      description: 'Claude Fable 5, running through your Claude Code CLI.',
     },
   ],
   // Codex sandbox_mode -> Claude Code permission mode.

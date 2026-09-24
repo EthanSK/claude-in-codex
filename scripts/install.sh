@@ -141,4 +141,4 @@ enable_request_compression = false $TAG
   say "disabled Codex request compression (Node $("$NODE" -v) has no zstd)"
 fi
 
-say "Done. Quit and reopen the Codex app, then pick Opus 5.5 or Fable in the model picker."
+say "Done. Quit and reopen the Codex app, then pick Opus 5.5 or Fable 5 in the model picker."
