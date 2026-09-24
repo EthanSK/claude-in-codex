@@ -400,16 +400,69 @@ test('websocket upgrade without a model hint gets 426 so older Codex falls back 
   assert.match(res, /^HTTP\/1.1 426/);
 });
 
-test('Claude websocket upgrade gets 426 so Claude keeps using HTTP', async () => {
-  const res = await new Promise((resolve) => {
-    const s = net.connect(port, '127.0.0.1', () => {
-      s.write('GET /backend-api/codex/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nx-codex-routing-hint: model=claude-opus-5-5\r\n\r\n');
-    });
-    let data = '';
-    s.on('data', (chunk) => (data += chunk));
-    s.on('end', () => resolve(data));
+test('a fresh Opus websocket side chat reaches Claude and can later switch to GPT', async () => {
+  upstreamUpgradeRequests = [];
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`, {
+    headers: { 'x-codex-routing-hint': 'model=claude-opus-5-5', authorization: 'Bearer test' },
   });
-  assert.match(res, /^HTTP\/1.1 426/);
+  await new Promise((resolve, reject) => {
+    socket.once('open', resolve);
+    socket.once('error', reject);
+  });
+  try {
+    assert.match(socket.extensions, /permessage-deflate/);
+    assert.equal(upstreamUpgradeRequests.length, 0, 'Claude does not open an OpenAI socket');
+
+    const body = JSON.parse(responsesBody('claude-opus-5-5', [envContext(workdir), userMsg('fresh side hello')]));
+    const priorClaudeCalls = readClaudeLog().length;
+    socket.send(JSON.stringify({ type: 'response.create', ...body, generate: false }));
+    const prewarm = await new Promise((resolve, reject) => {
+      const onMessage = (data) => {
+        const event = JSON.parse(data.toString());
+        if (event.type === 'response.completed') {
+          socket.off('message', onMessage);
+          resolve(event);
+        }
+      };
+      socket.on('message', onMessage);
+      socket.once('error', reject);
+    });
+    assert.equal(prewarm.response.model, 'claude-opus-5-5');
+    assert.equal(readClaudeLog().length, priorClaudeCalls);
+
+    socket.send(JSON.stringify({ type: 'response.create', ...body, client_metadata: { thread_id: 'fresh-side-test', turn_id: 'fresh-side-turn' } }));
+    const events = await new Promise((resolve, reject) => {
+      const received = [];
+      const timeout = setTimeout(() => reject(new Error('fresh Claude websocket response timed out')), 3000);
+      const onMessage = (data) => {
+        const event = JSON.parse(data.toString());
+        received.push(event);
+        if (event.type === 'response.completed') {
+          clearTimeout(timeout);
+          socket.off('message', onMessage);
+          resolve(received);
+        }
+      };
+      socket.on('message', onMessage);
+      socket.once('error', reject);
+    });
+    assert.ok(events.some((event) => event.type === 'response.output_text.delta'));
+    assert.equal(events.at(-1).response.model, 'claude-opus-5-5');
+    assert.equal(JSON.parse(readClaudeLog().at(-1).stdin).message.content[0].text, 'fresh side hello');
+    assert.equal(upstreamUpgradeRequests.length, 0);
+
+    socket.send(JSON.stringify({ type: 'response.create', model: 'gpt-6-sol', input: [] }));
+    const gptReply = await new Promise((resolve, reject) => {
+      socket.once('message', (data) => resolve(data.toString()));
+      socket.once('error', reject);
+    });
+    assert.equal(gptReply, 'OK');
+    assert.equal(upstreamUpgradeRequests.length, 1);
+    assert.equal(upstreamUpgradeRequests[0].headers['x-codex-routing-hint'], 'model=gpt-6-sol');
+    assert.equal(upstreamUpgradeRequests[0].headers.authorization, 'Bearer test');
+  } finally {
+    socket.close();
+  }
 });
 
 test('GPT websocket traffic and auth pass through to upstream', async () => {

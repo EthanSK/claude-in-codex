@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-24T15:30:00Z
+**Trigger:** A fresh Opus side chat still did not start after the GPT-prewarmed WebSocket fix
+**Symptom:** Codex's `queued_side_chat` turn selected `claude-opus-5-5`, but the bridge logged no Claude turn; the Codex trace reported `websocket reuse properties didn't match`.
+**Root cause:** The bridge still rejected WebSocket upgrades whose handshake named Claude with HTTP 426. Codex can open a separate Claude-hinted connection for a fresh side chat instead of sending Opus over a GPT-prewarmed connection. The desktop handshake was not captured, so this route is a concrete uncovered cause consistent with the trace, not yet confirmed as that turn's only failure.
+**Fix:** `src/server.js` accepts Claude-hinted WebSockets, routes their Claude frames locally, and opens an upstream GPT WebSocket only if a later frame needs GPT.
+**Guard:** `test/bridge.test.js` covers fresh Claude-hinted WebSocket prewarm, Opus turn, and later GPT switch, alongside the existing GPT-prewarmed Opus test. Installed desktop acceptance remains a separate check.
+---
+
+---
 **Date:** 2026-09-24T13:35:00Z
 **Trigger:** An Opus side chat fails even after selecting Opus with `/model`
 **Symptom:** Codex says the Claude model is unsupported with a ChatGPT account, while the bridge logs a GPT WebSocket upgrade but no Claude turn.

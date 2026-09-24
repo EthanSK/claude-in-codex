@@ -46,7 +46,7 @@ function readBody(req) {
 }
 
 // ResponsesStream writes complete SSE events. This adapter sends the same event
-// JSON over a WebSocket when Codex changes models on an already-open GPT socket.
+// JSON over a WebSocket for Claude turns, including model switches on an open socket.
 class WebSocketResponse extends EventEmitter {
   constructor(socket) {
     super();
@@ -264,6 +264,38 @@ export function createBridge(config = loadConfig(), state = new State()) {
     socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   }
 
+  function routeWebSocketMessage(req, client, data, isBinary, forwardGpt) {
+    let body;
+    try { body = isBinary ? null : JSON.parse(data.toString()); } catch { body = null; }
+    const modelCfg = claudeSlugs.get(body?.model);
+    if (!modelCfg) return forwardGpt(data, isBinary);
+    if (body.generate === false) {
+      const stream = new ResponsesStream(new WebSocketResponse(client), { model: body.model });
+      stream.begin();
+      stream.complete(usageObject());
+      return;
+    }
+    if (!isAgentTurn(body)) {
+      body.model = fallbackGptModel(config, state);
+      if (body.reasoning?.effort && !['low', 'medium', 'high'].includes(body.reasoning.effort)) body.reasoning.effort = 'medium';
+      if (Array.isArray(body.input)) body.input = sanitizeInputForOpenAI(body.input).input;
+      return forwardGpt(JSON.stringify(body), false);
+    }
+    const metadata = body.client_metadata || {};
+    const turnReq = {
+      headers: {
+        ...req.headers,
+        'thread-id': metadata.thread_id || req.headers['thread-id'],
+        'turn-id': metadata.turn_id || req.headers['turn-id'],
+      },
+    };
+    const response = new WebSocketResponse(client);
+    handleClaudeResponses(turnReq, response, body, modelCfg).catch((error) => {
+      log.error(`Claude websocket turn crashed: ${error.stack || error}`);
+      if (client.readyState === WebSocket.OPEN) client.close(1011, 'Claude turn failed');
+    });
+  }
+
   function proxyWebSocket(req, socket, head) {
     const denied = localOnly(req);
     if (denied) return rejectWebSocket(socket, '403 Forbidden');
@@ -273,7 +305,46 @@ export function createBridge(config = loadConfig(), state = new State()) {
     // Codex 0.155+ names the model before the upgrade. Older clients omit this
     // hint, so keep their known-good HTTP fallback instead of guessing a route.
     const model = String(req.headers['x-codex-routing-hint'] || '').match(/(?:^|;)\s*model=([\w.-]+)/)?.[1];
-    if (!model || isClaude(model)) return rejectWebSocket(socket);
+    if (!model) return rejectWebSocket(socket);
+
+    if (isClaude(model)) {
+      // A fresh side chat can start with Claude in the handshake; it will not
+      // retry over HTTP when this upgrade is rejected. Open GPT lazily if a later
+      // frame on this same socket switches models or requests housekeeping.
+      const wss = new WebSocketServer({ noServer: true, perMessageDeflate: true });
+      wss.handleUpgrade(req, socket, head, (client) => {
+        log.info(`local Claude websocket model=${model}`);
+        let upstream;
+        const pendingGpt = [];
+        const forwardGpt = (data, isBinary) => {
+          if (!upstream) {
+            const target = new URL(`${config.upstream}/responses${url.search}`);
+            target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
+            const headers = { ...req.headers, 'x-codex-routing-hint': `model=${fallbackGptModel(config, state)}` };
+            for (const key of Object.keys(headers)) {
+              if (['host', 'connection', 'upgrade', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions'].includes(key)) delete headers[key];
+            }
+            upstream = new WebSocket(target, { headers, perMessageDeflate: true, handshakeTimeout: 15000 });
+            upstream.on('open', () => {
+              for (const queued of pendingGpt.splice(0)) upstream.send(queued.data, { binary: queued.isBinary });
+            });
+            upstream.on('message', (message, binary) => {
+              if (client.readyState === WebSocket.OPEN) client.send(message, { binary });
+            });
+            upstream.on('error', (error) => {
+              log.error(`GPT websocket upstream failed: ${error.message}`);
+              if (client.readyState === WebSocket.OPEN) client.close(1011, 'Upstream WebSocket failed');
+            });
+            upstream.on('close', () => client.close());
+          }
+          if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
+          else pendingGpt.push({ data, isBinary });
+        };
+        client.on('message', (data, isBinary) => routeWebSocketMessage(req, client, data, isBinary, forwardGpt));
+        client.on('close', () => upstream?.terminate());
+      });
+      return;
+    }
 
     const target = new URL(`${config.upstream}/responses${url.search}`);
     target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -301,40 +372,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
         client = connectedClient;
         log.info(`proxied GPT websocket model=${model}`);
         socket.resume();
-        client.on('message', (data, isBinary) => {
-          let body;
-          try { body = isBinary ? null : JSON.parse(data.toString()); } catch { body = null; }
-          const modelCfg = claudeSlugs.get(body?.model);
-          if (!modelCfg) return upstream.send(data, { binary: isBinary });
-          if (body.generate === false) {
-            // Codex prewarms a connection without asking the model to answer.
-            const stream = new ResponsesStream(new WebSocketResponse(client), { model: body.model });
-            stream.begin();
-            stream.complete(usageObject());
-            return;
-          }
-          if (!isAgentTurn(body)) {
-            body.model = fallbackGptModel(config, state);
-            if (body.reasoning?.effort && !['low', 'medium', 'high'].includes(body.reasoning.effort)) body.reasoning.effort = 'medium';
-            if (Array.isArray(body.input)) body.input = sanitizeInputForOpenAI(body.input).input;
-            return upstream.send(JSON.stringify(body));
-          }
-          // The handshake can prewarm GPT before the side chat switches to Claude.
-          // Route by each message's model, never by the handshake hint alone.
-          const metadata = body.client_metadata || {};
-          const turnReq = {
-            headers: {
-              ...req.headers,
-              'thread-id': metadata.thread_id || req.headers['thread-id'],
-              'turn-id': metadata.turn_id || req.headers['turn-id'],
-            },
-          };
-          const response = new WebSocketResponse(client);
-          handleClaudeResponses(turnReq, response, body, modelCfg).catch((error) => {
-            log.error(`Claude websocket turn crashed: ${error.stack || error}`);
-            if (client.readyState === WebSocket.OPEN) client.close(1011, 'Claude turn failed');
-          });
-        });
+        client.on('message', (data, isBinary) => routeWebSocketMessage(req, client, data, isBinary, (message, binary) => upstream.send(message, { binary })));
         upstream.on('message', (data, isBinary) => {
           if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
         });
