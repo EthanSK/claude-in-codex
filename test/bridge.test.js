@@ -21,6 +21,7 @@ process.env.FAKE_CLAUDE_LOG = claudeLog;
 const { createBridge } = await import('../src/server.js');
 const { DEFAULTS, findCodexComputerUseMcpConfig } = await import('../src/config.js');
 const { State } = await import('../src/state.js');
+const { mergeCatalog } = await import('../src/catalog.js');
 
 let upstream;
 let upstreamRequests = [];
@@ -157,6 +158,15 @@ test('model catalog adds Claude models after GPT', async () => {
   assert.ok(r.headers.etag.startsWith('"ccb-'));
   assert.ok(upstreamRequests.at(-1).url.includes('client_version=1.0'));
   assert.equal(upstreamRequests.at(-1).headers.authorization, 'Bearer test');
+});
+
+test('hidden upstream models stay available without appearing in the picker', () => {
+  const hiddenModels = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+  const olderModels = hiddenModels.map((slug, index) => ({ ...GPT_MODEL, slug, priority: index + 4 }));
+  const models = mergeCatalog({ ...DEFAULTS, hiddenModels }, new State(path.join(tmp, 'hidden-state.json')), [GPT_MODEL, ...olderModels]);
+  for (const slug of hiddenModels) assert.equal(models.find((model) => model.slug === slug).visibility, 'hide');
+  assert.equal(models.find((model) => model.slug === 'gpt-6-sol').visibility, 'list');
+  assert.deepEqual(models.slice(-2).map((model) => model.slug), ['claude-opus-5-5', 'claude-fable-5-1']);
 });
 
 test('Claude turn streams text, reasoning, web search and a marker; second turn resumes', async () => {

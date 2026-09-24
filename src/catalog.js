@@ -64,7 +64,10 @@ export function pickTemplate(models) {
 }
 
 export function mergeCatalog(config, state, upstreamModels) {
-  const gpt = (upstreamModels || []).filter((m) => !config.models.some((c) => c.slug === m.slug));
+  const hiddenModels = new Set(config.hiddenModels || []);
+  const gpt = (upstreamModels || [])
+    .filter((m) => !config.models.some((c) => c.slug === m.slug))
+    .map((m) => hiddenModels.has(m.slug) ? { ...m, visibility: 'hide' } : m);
   const maxPriority = Math.max(0, ...gpt.map((m) => m.priority ?? 0));
   return [...gpt, ...claudeEntries(config, state, pickTemplate(gpt), maxPriority)];
 }

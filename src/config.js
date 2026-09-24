@@ -66,6 +66,8 @@ export const DEFAULTS = {
       description: 'Claude Fable 5.1, running through your Claude Code CLI.',
     },
   ],
+  // Keep selected upstream models usable in existing chats while omitting them from the picker.
+  hiddenModels: [],
   // Codex sandbox_mode -> Claude Code permission mode.
   permissionModes: {
     'danger-full-access': 'bypassPermissions',

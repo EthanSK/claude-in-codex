@@ -130,6 +130,7 @@ For long chats, stick mainly to one model and switch for second opinions.
     { "slug": "claude-fable-5-1", "displayName": "Fable 5.1", "claudeModel": "claude-fable-5-1" },
     { "slug": "claude-sonnet-5", "displayName": "Sonnet 5", "claudeModel": "claude-sonnet-5" }
   ],
+  "hiddenModels": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
   "permissionModes": { "workspace-write": "auto" },
   "fallbackModel": "gpt-5.5",
   "extraSystemPrompt": "",
@@ -138,6 +139,7 @@ For long chats, stick mainly to one model and switch for second opinions.
 ```
 
 - `models`: what appears in the picker. `claudeModel` is anything `claude --model` accepts (an alias or a full model name). Put the version in `displayName` (e.g. "Sonnet 5") so the picker shows exactly which model you get.
+- `hiddenModels`: optional upstream model slugs to hide from the picker. They remain in the catalog so existing chats can still use them. The example hides the three GPT-5.6 entries; the default is an empty list.
 - `permissionModes`: maps Codex's sandbox mode to a Claude Code permission mode.
 - `fallbackModel`: the GPT model that answers housekeeping requests.
 - `codexComputerUseMcpConfig`: found automatically when Codex's bundled Computer Use plugin is explicitly enabled. Set it to `null` to disable sharing or to a `.mcp.json` path to override discovery.
