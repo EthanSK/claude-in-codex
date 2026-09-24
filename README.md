@@ -72,9 +72,44 @@ In the chat:
 - Web searches and page fetches show as Codex's native search cards.
 - File changes appear in Codex's diff view like any other change in your repo.
 
-**Switch models mid-chat freely.** Claude gets whatever GPT said and did since its last turn. GPT sees Claude's replies. If you edit an earlier message, Claude starts a fresh session seeded with the conversation as it now looks.
-
 Codex housekeeping requests made while a Claude model is selected, such as thread titles, are answered by your top GPT model.
+
+### Claude runs as Claude Code, not as a model inside Codex's agent
+
+Claude uses Claude Code's own tools (shell, file edits, subagents, …), plus the CLAUDE.md, memory, skills and MCP servers from your Claude Code setup. From Codex it gets your AGENTS.md, your Codex skills list, the chat's folder, the permission mode and the chat so far. That's why your AGENTS.md rules and Codex skills still apply.
+
+Codex's own plugins (Computer Use, for example) and MCP servers you've only set up in Codex aren't available to Claude. To give Claude an MCP server, add it to Claude Code too (`claude mcp add …`).
+
+### Switching models mid-chat
+
+Switch freely. Switching doesn't make Codex compact the chat.
+
+| Switch | What the next model sees |
+|---|---|
+| GPT → Claude, first time in a chat | A new Claude session with the chat so far as text: your messages, GPT's replies, and GPT's commands with their output (each output cut to 2,000 characters). Only the latest 60,000 characters are passed. GPT's reasoning is encrypted by OpenAI, so Claude never sees it. |
+| Back to Claude later | Claude resumes its own session and gets only what happened since its last reply. |
+| Claude → GPT | Claude's replies, as normal assistant messages. Not Claude's thinking or tool steps. Claude's file changes are on disk, so GPT can read them. |
+| You edit an earlier message | Claude starts a new session from the chat as it now looks. |
+| Side chat or fork | Its own fork of the parent chat's Claude session. |
+
+### Compaction
+
+Codex still decides when to compact: automatically, or when you run `/compact`. The bridge reports Claude's real token count and context window, so Codex's context meter is accurate. When Codex compacts a Claude chat, the bridge runs Claude Code's own `/compact` on the Claude session. Claude Code can also compact by itself during a turn ("Compacted context").
+
+Compacted history doesn't carry across models:
+
+- After Claude compacts, GPT gets a note that earlier Claude turns were compacted. It can't see their details.
+- After GPT compacts, OpenAI's summary is encrypted, so Claude can't read it. Claude gets a note in its place.
+
+For long chats, stick mainly to one model and switch for second opinions.
+
+### Cost and caching
+
+- Each model uses its own account: Claude your Claude login, GPT your ChatGPT login. Switching doesn't bill anything twice.
+- The first Claude message in a chat costs the most. Claude Code's system prompt, your AGENTS.md, the skills list and the pasted chat are all new.
+- Every later message continues the same Claude Code session. Each message starts a new `claude` process, but Anthropic's prompt cache is on the server, so the earlier conversation is read from the cache. For example, a follow-up in a chat of about 100k tokens, sent 6 minutes after the last reply, read about 99k tokens from the cache and only added about 4k new ones.
+- If a chat sits idle long enough for the cache to expire, the next message caches the history again, once.
+- Switching back to GPT only adds Claude's replies as new input. OpenAI's prompt cache can still cover the earlier part of the chat.
 
 ## Configuration
 
