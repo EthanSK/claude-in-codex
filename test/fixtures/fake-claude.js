@@ -14,7 +14,7 @@ let stdin = '';
 process.stdin.on('data', (d) => (stdin += d));
 process.stdin.on('end', () => {
   const resumeIdx = args.indexOf('--resume');
-  const sid = resumeIdx >= 0 ? args[resumeIdx + 1] : crypto.randomUUID();
+  const sid = resumeIdx >= 0 && !args.includes('--fork-session') ? args[resumeIdx + 1] : crypto.randomUUID();
   if (log) fs.appendFileSync(log, JSON.stringify({ args, stdin, cwd: process.cwd() }) + '\n');
   const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 

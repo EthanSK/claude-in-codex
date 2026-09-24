@@ -162,6 +162,12 @@ export function createBridge(config = loadConfig(), state = new State()) {
 
   async function handleClaudeResponses(req, res, body, modelCfg) {
     const parsed = parseCodexRequest(body, (sid, turnId) => state.isLatestTurn(sid, turnId));
+    // Side chats / forked threads start from the parent's history: give them their own
+    // fork of the parent's Claude session instead of taking over the parent's session.
+    const threadId = String(req.headers['thread-id'] || req.headers['session-id'] || body.prompt_cache_key || '') || null;
+    parsed.threadId = threadId;
+    const owner = parsed.resume ? state.ownerThread(parsed.resume.sid) : null;
+    parsed.fork = Boolean(parsed.resume && owner && threadId && owner !== threadId);
     const stream = new ResponsesStream(res, { model: body.model });
     stream.begin();
 
@@ -178,7 +184,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
       }
       const turnId = rid('t');
       stream.compaction(newSid ? makeMarker(newSid, turnId) : 'ccb:v1:none:none');
-      if (newSid) state.recordTurn(newSid, turnId);
+      if (newSid) state.recordTurn(newSid, turnId, parsed.threadId);
       stream.complete(usageObject());
       return;
     }

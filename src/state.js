@@ -22,8 +22,18 @@ export class State {
     return this.data.sessions[sid]?.lastTurnId === turnId;
   }
 
-  recordTurn(sid, turnId) {
-    this.data.sessions[sid] = { lastTurnId: turnId, updatedAt: new Date().toISOString() };
+  // Which Codex thread owns a Claude session (another thread resuming it = fork).
+  ownerThread(sid) {
+    return this.data.sessions[sid]?.threadId ?? null;
+  }
+
+  recordTurn(sid, turnId, threadId = null) {
+    const prev = this.data.sessions[sid] || {};
+    this.data.sessions[sid] = {
+      lastTurnId: turnId,
+      threadId: threadId || prev.threadId || null,
+      updatedAt: new Date().toISOString(),
+    };
     this.prune();
     this.save();
   }

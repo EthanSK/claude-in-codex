@@ -355,3 +355,26 @@ test('catalog marks Claude models as classic (non-lite) request format', async (
   const { models } = JSON.parse(r.data);
   assert.equal(models.find((m) => m.slug === 'claude-opus-5-5').use_responses_lite, false);
 });
+
+test('side chat (different thread) forks the parent Claude session; parent keeps its own', async () => {
+  fs.rmSync(claudeLog, { force: true });
+  const h = (thread) => ({ 'content-type': 'application/json', 'thread-id': thread });
+  const input1 = [envContext(workdir), userMsg('main task')];
+  const r1 = await request('/backend-api/codex/responses', { body: responsesBody('claude-opus-5-5', input1), headers: h('main') });
+  const out1 = parseSse(r1.data).filter((e) => e.type === 'response.output_item.done').map((e) => e.item);
+  const parentSid = out1.at(-1).encrypted_content.split(':')[2];
+
+  // Side chat: same history, new thread id.
+  const rs = await request('/backend-api/codex/responses', { body: responsesBody('claude-opus-5-5', [...input1, ...out1, userMsg('side question')]), headers: h('side') });
+  const sideMarker = parseSse(rs.data).filter((e) => e.type === 'response.output_item.done').map((e) => e.item).at(-1).encrypted_content;
+  let calls = readClaudeLog();
+  assert.ok(calls[1].args.includes('--fork-session'));
+  assert.equal(calls[1].args[calls[1].args.indexOf('--resume') + 1], parentSid);
+  assert.notEqual(sideMarker.split(':')[2], parentSid, 'side chat gets its own session');
+
+  // Main thread continues its own session untouched.
+  await request('/backend-api/codex/responses', { body: responsesBody('claude-opus-5-5', [...input1, ...out1, userMsg('main continues')]), headers: h('main') });
+  calls = readClaudeLog();
+  assert.ok(!calls[2].args.includes('--fork-session'));
+  assert.equal(calls[2].args[calls[2].args.indexOf('--resume') + 1], parentSid);
+});

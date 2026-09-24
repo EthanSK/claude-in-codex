@@ -111,12 +111,13 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     const effortLevel = EFFORT[String(effort || '').toLowerCase()];
     if (caps.effort && effortLevel) args.push('--effort', effortLevel);
     if (parsed.resume) args.push('--resume', parsed.resume.sid);
+    if (parsed.fork) args.push('--fork-session');
     const system = [BRIDGE_NOTE, config.extraSystemPrompt, ...parsed.agentsMd].filter(Boolean).join('\n\n');
     args.push('--append-system-prompt', system);
 
     log.info(
       `claude turn model=${modelCfg.claudeModel} mode=${permissionMode} effort=${effortLevel || '-'} cwd=${cwd} ${
-        parsed.resume ? `resume=${parsed.resume.sid}` : 'new-session'
+        parsed.resume ? `${parsed.fork ? 'fork' : 'resume'}=${parsed.resume.sid}` : 'new-session'
       }`,
     );
 
@@ -208,7 +209,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     if (ctx.sid) {
       const turnId = rid('t');
       stream.marker(makeMarker(ctx.sid, turnId));
-      state.recordTurn(ctx.sid, turnId);
+      state.recordTurn(ctx.sid, turnId, parsed.threadId);
     }
 
     const u = ctx.lastUsage || {};
