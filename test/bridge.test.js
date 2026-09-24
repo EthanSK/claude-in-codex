@@ -487,6 +487,13 @@ test('an Opus side-chat turn on a GPT-prewarmed websocket goes to Claude', async
     assert.ok(events.some((event) => event.type === 'response.output_text.delta'));
     assert.equal(events.at(-1).response.model, 'claude-opus-5-5');
     assert.equal(JSON.parse(readClaudeLog().at(-1).stdin).message.content[0].text, 'side hello');
+
+    socket.send(JSON.stringify({ type: 'response.create', model: 'gpt-6-sol', input: [] }));
+    const resumedGpt = await new Promise((resolve, reject) => {
+      socket.once('message', (data) => resolve(data.toString()));
+      socket.once('error', reject);
+    });
+    assert.equal(resumedGpt, 'OK');
   } finally {
     socket.close();
   }
