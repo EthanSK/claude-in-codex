@@ -1,4 +1,4 @@
-# codex-claude-bridge
+# claude-in-codex
 
 **Use Claude models inside the OpenAI Codex app.** Claude models appear in Codex's model picker next to GPT. Pick one, and that chat runs on your own **Claude Code CLI**, covered by your Claude subscription. GPT keeps working exactly as before.
 
@@ -7,7 +7,7 @@ Codex app ──► 127.0.0.1:18787 ──┬─ GPT model    → chatgpt.com, u
                                 └─ Claude model → `claude -p` in the chat's project folder (your Claude login)
 ```
 
-Claude Code does all the work: its own agent loop, tools, CLAUDE.md, skills and MCP servers. Codex is the window. The bridge never reads or stores any credentials. For GPT it relays Codex's own requests to OpenAI; for Claude it runs the official `claude` binary.
+Claude Code does all the work: its own agent loop, tools, CLAUDE.md, skills and MCP servers. Codex is the window. The bridge, a small local service named `codex-claude-bridge`, never reads or stores any credentials. For GPT it relays Codex's own requests to OpenAI; for Claude it runs the official `claude` binary.
 
 > Unofficial side project. Not affiliated with or endorsed by OpenAI or Anthropic. You're responsible for using each service within its terms.
 
@@ -21,8 +21,8 @@ Claude Code does all the work: its own agent loop, tools, CLAUDE.md, skills and 
 ## Setup
 
 ```bash
-git clone https://github.com/<you>/codex-claude-bridge.git
-cd codex-claude-bridge
+git clone https://github.com/EthanSK/claude-in-codex.git
+cd claude-in-codex
 ./scripts/install.sh
 ```
 
