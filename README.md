@@ -7,6 +7,14 @@ Codex app ──► 127.0.0.1:18787 ──┬─ GPT model    → chatgpt.com, u
                                 └─ Claude model → `claude -p` in the chat's project folder (your Claude login)
 ```
 
+**How it works, in short:**
+
+1. The installer adds one line to `~/.codex/config.toml`, so Codex sends its model requests to a small local service instead of straight to OpenAI.
+2. The service adds your Claude models to Codex's model list.
+3. When you send a message, the service checks the chosen model. GPT requests go on to OpenAI unchanged. Claude requests start your `claude` CLI in the chat's project folder.
+4. Claude Code's output is translated into the events Codex already shows: replies, thinking, tool steps and plans. Claude edits the real files, so its changes appear in Codex's diff view as usual.
+5. Each Codex chat is tied to its own Claude Code session, so the next message carries on where the last one stopped.
+
 Claude Code does all the work: its own agent loop, tools, CLAUDE.md, skills and MCP servers. Codex is the window. The bridge, a small local service named `codex-claude-bridge`, never reads or stores any credentials. For GPT it relays Codex's own requests to OpenAI; for Claude it runs the official `claude` binary.
 
 > Unofficial side project. Not affiliated with or endorsed by OpenAI or Anthropic. You're responsible for using each service within its terms.
