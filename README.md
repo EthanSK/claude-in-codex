@@ -65,7 +65,7 @@ On macOS, `RunAtLoad` and `KeepAlive` in `~/Library/LaunchAgents/com.codex-claud
 | Codex memory block | included in Claude's system prompt when Codex sends it |
 | Codex Computer Use plugin | its installed MCP server is available to Claude for desktop and browser tasks when enabled |
 | Each chat | its own Claude session (`--resume`) |
-| Side chats and forked chats | their own fork of the parent's session (`--fork-session`) |
+| Forked chats that reach the bridge | their own fork of the parent's session (`--fork-session`) |
 | Compact (auto or `/compact`) | Claude Code's `/compact` |
 | Stop button | interrupts Claude |
 | Attached images | passed to Claude |
@@ -95,7 +95,7 @@ Switch freely. Switching doesn't make Codex compact the chat.
 | Back to Claude later | Claude resumes its own session and gets only what happened since its last reply. |
 | Claude → GPT | Claude's replies, as normal assistant messages. Not Claude's thinking or tool steps. Claude's file changes are on disk, so GPT can read them. |
 | You edit an earlier message | Claude starts a new session from the chat as it now looks. |
-| Side chat or fork | Its own fork of the parent chat's Claude session. |
+| Fork that reaches the bridge | Its own fork of the parent chat's Claude session. |
 
 ### Compaction
 
@@ -147,7 +147,7 @@ After changing the config, restart the service, then restart Codex so it reloads
 launchctl kickstart -k gui/$(id -u)/com.codex-claude-bridge
 ```
 
-Code changes in `src/` are picked up automatically: the service restarts itself once idle.
+Code changes in `src/` are picked up automatically once every request and WebSocket connection closes. A long-lived GPT WebSocket can delay that restart; check the service's PID or a fresh `listening on` log line before claiming the new code is live. If a restart is needed, wait for active turns to finish before using the command above.
 
 ## Troubleshooting
 
@@ -155,15 +155,17 @@ Code changes in `src/` are picked up automatically: the service restarts itself 
 - **The installer says the port is in use.** Something else is on 18787; the installer names it. Run `CODEX_CLAUDE_BRIDGE_PORT=18888 ./scripts/install.sh`. The default isn't 8787 because that's `wrangler dev`'s default.
 - **Claude is selected but GPT answers.** Update the bridge (`git pull`); Codex's request format changes between versions. Then check the log for `claude turn model=…` lines.
 - **"Claude Code stopped: …" in a reply.** That's Claude Code's own error (auth, usage limit, unknown model name). Run the same model in a terminal with `claude -p --model <name> "hi"` to see it directly.
+- **An Opus side chat stays on Thinking or says the model is unsupported with a ChatGPT account.** A Codex desktop side chat produced that error before the bridge saw a Claude turn, even though a normal local Opus turn worked. The bridge cannot route a request it does not receive. Use a full local Codex chat for Opus, or choose GPT for that side chat. If a future Codex update changes this, compare the side chat's timestamp with `claude turn` in the bridge log before changing the bridge. A local CLI run with user config ignored reproduced the same error, but that does not prove exactly where the desktop side chat drops the config.
 - **Logs:** `tail -f ~/Library/Logs/codex-claude-bridge.log`
 
 ## Limits
 
 - Claude's tool calls don't go through Codex's approval prompts. Permissions come from the mapping above.
 - Codex 0.155 (tested here) tells the bridge which model is connecting in the WebSocket handshake. GPT connections are passed through to OpenAI over WebSocket; Claude still uses HTTP. Older Codex versions that omit that model hint use HTTP for both. The bridge remains a local hop, and its latency versus a direct GPT connection has not been measured.
+- Forked Claude sessions work when Codex sends their requests to the bridge; this does not guarantee that every desktop side-chat surface uses the configured bridge.
 - The Computer Use MCP server runs through Claude Code's tool permissions, not Codex's own tool approval prompts. Its browser and desktop actions are available, but this does not give Claude every Codex app tool.
 - This depends on Codex's internal request format, which can change with Codex updates. The tests pin the shapes the bridge relies on.
-- All of Codex's model requests go through the bridge, GPT included. If the service isn't running, GPT stops working in Codex too. `./scripts/uninstall.sh` sends Codex straight to OpenAI again.
+- Model requests on the configured local Codex route go through the bridge, GPT included. If the service isn't running, GPT on that route stops working too. `./scripts/uninstall.sh` restores Codex's direct OpenAI route; the observed desktop side-chat failure above took a different path.
 - Codex's desktop-app instructions aren't passed to Claude. Claude Code's own memory still applies alongside the Codex memory block when one is supplied.
 
 ### Can GPT bypass the bridge?

@@ -24,6 +24,24 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-24T13:11:00Z
+**Trigger:** Checking whether a source edit had reached the installed bridge
+**Symptom:** The log said `server.js changed; restarting when idle`, but the same PID continued serving and the earlier temporary diagnostic message remained in its log output.
+**Root cause:** Open connections, including long-lived GPT WebSockets, keep the service's active count above zero and delay the idle restart.
+**Fix:** Clarify in `README.md` that a source edit is not live until the PID changes or a fresh startup log appears; wait for active turns before forcing a restart.
+**Guard:** Verify the installed PID/startup log after code changes; do not treat a pending-reload line as deployment evidence.
+---
+
+---
+**Date:** 2026-09-24T13:06:00Z
+**Trigger:** Opus side chat stays on Thinking, then shows an unsupported-model error
+**Symptom:** Codex desktop said `The 'claude-opus-5-5' model is not supported when using Codex with a ChatGPT account.`
+**Root cause:** The failing side-chat attempt did not produce a bridge Claude-turn log entry. A normal local Codex Opus turn reached the bridge; a CLI turn with user config ignored reproduced the exact 400. This establishes a different request/config path for the failing attempt, but not the precise desktop component responsible.
+**Fix:** Document the observed side-chat limitation and diagnostic boundary in `README.md`; do not alter bridge fork logic for a request it never receives.
+**Guard:** Controlled local Opus smoke test plus the CLI `--ignore-user-config` reproduction; check bridge logs for a matching request before future side-chat changes.
+---
+
+---
 **Date:** 2026-09-24T12:50:48Z
 **Trigger:** GPT takes the bridge's HTTP fallback; can it keep WebSocket transport?
 **Symptom:** The bridge answered every WebSocket upgrade with 426, including GPT's, so GPT requests used HTTP streaming.
