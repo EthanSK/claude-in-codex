@@ -82,6 +82,16 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     ? 'plan'
     : config.permissionModes[parsed.sandboxMode] || config.defaultPermissionMode;
   let cwd = parsed.cwd && fs.existsSync(parsed.cwd) ? parsed.cwd : os.homedir();
+  // Canonicalise the cwd (resolve symlinks). Claude reports tool file paths from its
+  // own process.cwd(), which Node always resolves — on macOS /tmp and /var are
+  // symlinks into /private, so a Codex cwd of /var/... yields file paths under
+  // /private/var/... and describeToolUse() could never strip the cwd prefix,
+  // leaving every "Editing/Reading ..." summary as a long absolute path.
+  try {
+    cwd = fs.realpathSync(cwd);
+  } catch {
+    // keep the unresolved path; existsSync passed so this is a permissions edge case
+  }
 
   const lockKey = parsed.resume?.sid || rid('new_');
   await withSessionLock(lockKey, async () => {

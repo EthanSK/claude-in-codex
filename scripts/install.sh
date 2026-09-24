@@ -20,6 +20,12 @@ die() { printf '\033[31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 NODE="$(command -v node || true)"
 [ -z "$NODE" ] && NODE="$(zsh -lic 'command -v node' 2>/dev/null | tail -1 || true)"
 [ -x "$NODE" ] || die "node not found. Install Node 22+ (brew install node)."
+# `node` on PATH may be a shell shim (nvm/volta/fnm wrapper) rather than the real
+# binary. launchd should exec the real binary: a shim that sources nvm.sh on every
+# start is slow, depends on the shim's own environment, and is a needless failure
+# point for a KeepAlive service. process.execPath is always the actual executable.
+NODE="$("$NODE" -p 'process.execPath')"
+[ -x "$NODE" ] || die "could not resolve the real node binary (got '$NODE')."
 NODE_MAJOR="$("$NODE" -p 'process.versions.node.split(".")[0]')"
 [ "$NODE_MAJOR" -ge 20 ] || die "Node $("$NODE" -v) is too old; need 20+."
 HAS_ZSTD="$("$NODE" -p 'typeof require("zlib").zstdDecompressSync === "function"')"
@@ -73,12 +79,28 @@ cat > "$PLIST" <<PLIST
 </dict>
 </plist>
 PLIST
+# Unload any previous copy of the service. `bootout` returns before launchd has
+# actually finished tearing the job down, and a `bootstrap` issued while the old
+# registration is still draining fails with "Bootstrap failed: 5: Input/output
+# error" (seen on re-install). So poll until the label is really gone instead of
+# relying on a fixed sleep.
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-sleep 1
+for i in $(seq 1 40); do
+  launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break
+  sleep 0.25
+done
+if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+  die "could not unload the previous $LABEL service; run: launchctl bootout gui/$(id -u)/$LABEL"
+fi
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   die "port $PORT is already used by: $(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | awk 'NR==2{print $1" (pid "$2")"}'). Re-run with CODEX_CLAUDE_BRIDGE_PORT=<free port>."
 fi
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
+# One retry: even after the label disappears from `launchctl print`, a bootstrap
+# that lands in the same instant can still hit the transient EIO above.
+if ! launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
+  sleep 1
+  launchctl bootstrap "gui/$(id -u)" "$PLIST" || die "launchctl bootstrap failed; see $LOG"
+fi
 say "service started (logs: $LOG)"
 
 for i in $(seq 1 20); do
