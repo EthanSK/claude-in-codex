@@ -60,6 +60,22 @@ export function decodeBody(raw, encoding) {
   throw new Error(`unsupported content-encoding ${enc}`);
 }
 
+// A real Codex agent turn (vs. a housekeeping call like title generation).
+// Tools arrive either in `tools` or, in Codex's "responses-lite" shape, as an
+// `additional_tools` input item; agent turns also always carry <environment_context>.
+export function isAgentTurn(body) {
+  if (Array.isArray(body.tools) && body.tools.length > 0) return true;
+  const input = Array.isArray(body.input) ? body.input : [];
+  return input.some(
+    (i) =>
+      i?.type === 'additional_tools' ||
+      i?.type === 'compaction_trigger' ||
+      (i?.type === 'message' &&
+        Array.isArray(i.content) &&
+        i.content.some((c) => typeof c?.text === 'string' && c.text.includes('<environment_context>'))),
+  );
+}
+
 export function createBridge(config = loadConfig(), state = new State()) {
   const log = makeLogger(config.logLevel);
   const claudeSlugs = new Map(config.models.map((m) => [m.slug, m]));
@@ -241,8 +257,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
     if (config.debugDumpDir && subpath.startsWith('/responses')) dump('request', { subpath, body });
 
     const modelCfg = claudeSlugs.get(body.model);
-    const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
-    if (subpath === '/responses' && modelCfg && (hasTools || Array.isArray(body.input) && body.input.some((i) => i?.type === 'compaction_trigger'))) {
+    if (subpath === '/responses' && modelCfg && isAgentTurn(body)) {
       try {
         return await handleClaudeResponses(req, res, body, modelCfg);
       } catch (err) {
@@ -306,6 +321,27 @@ if (isMain) {
     log.info(`listening on http://${config.host}:${config.port}${BASE_PATH} → ${config.upstream}`);
     log.info(`Claude models: ${config.models.map((m) => `${m.displayName} (${m.slug})`).join(', ')}`);
   });
+  // Reload after code updates: exit once idle and let launchd restart us with the new code.
+  let active = 0;
+  let reloadPending = false;
+  server.on('request', (req, res) => {
+    active++;
+    res.on('close', () => {
+      active--;
+      if (reloadPending && active === 0) process.exit(0);
+    });
+  });
+  const srcDir = path.dirname(fs.realpathSync(new URL(import.meta.url).pathname));
+  try {
+    fs.watch(srcDir, { persistent: false }, (_e, file) => {
+      if (!file || !file.endsWith('.js') || reloadPending) return;
+      reloadPending = true;
+      log.info(`${file} changed; restarting when idle`);
+      setTimeout(() => active === 0 && process.exit(0), 500);
+    });
+  } catch (err) {
+    log.error(`could not watch ${srcDir}: ${err.message}`);
+  }
   const stop = () => server.close(() => process.exit(0));
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);

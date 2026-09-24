@@ -46,6 +46,8 @@ export function claudeEntries(config, state, template, maxPriority = 0) {
       max_context_window: contextWindow,
       input_modalities: ['text', 'image'],
       supports_reasoning_effort_updates: false,
+      // Classic request shape (tools in `tools`, prompt in `instructions`), not responses-lite.
+      use_responses_lite: false,
     });
     for (const k of ['default_service_tier', 'available_access_programs', 'auto_compact_token_limit', 'guardian']) {
       delete entry[k];

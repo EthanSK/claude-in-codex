@@ -328,3 +328,30 @@ test('rejects browser-origin requests', async () => {
   const r = await request('/backend-api/codex/models', { method: 'GET', headers: { origin: 'https://evil.example' } });
   assert.equal(r.status, 403);
 });
+
+test('responses-lite requests (tools inside input) still go to Claude', async () => {
+  fs.rmSync(claudeLog, { force: true });
+  upstreamRequests = [];
+  const body = JSON.stringify({
+    model: 'claude-opus-5-5',
+    instructions: '',
+    input: [
+      { type: 'additional_tools', id: 'at_1', role: 'developer', tools: [{ type: 'function', name: 'shell' }] },
+      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'You are Codex, a coding agent...' }] },
+      envContext(workdir),
+      userMsg('hi what model are u'),
+    ],
+    stream: true,
+  });
+  const r = await request('/backend-api/codex/responses', { body, headers: { 'content-type': 'application/json' } });
+  assert.equal(upstreamRequests.length, 0, 'must not be sent to GPT');
+  assert.match(r.data, /msg_ccb_/);
+  const call = readClaudeLog()[0];
+  assert.equal(JSON.parse(call.stdin).message.content[0].text, 'hi what model are u');
+});
+
+test('catalog marks Claude models as classic (non-lite) request format', async () => {
+  const r = await request('/backend-api/codex/models', { method: 'GET' });
+  const { models } = JSON.parse(r.data);
+  assert.equal(models.find((m) => m.slug === 'claude-opus-5-5').use_responses_lite, false);
+});
