@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-24T13:35:00Z
+**Trigger:** An Opus side chat fails even after selecting Opus with `/model`
+**Symptom:** Codex says the Claude model is unsupported with a ChatGPT account, while the bridge logs a GPT WebSocket upgrade but no Claude turn.
+**Root cause:** Codex prewarms the side chat on a GPT WebSocket and can send the later Opus request on that same connection. The bridge chose the destination once from the handshake's GPT hint and blindly forwarded all later frames to OpenAI. The missing Claude-turn log did not mean the side chat bypassed the bridge.
+**Fix:** `src/server.js` now inspects each message on a GPT WebSocket and runs Claude messages locally, while forwarding GPT messages to OpenAI. `scripts/install.sh` installs the WebSocket dependency (commit `efbcc03`).
+**Guard:** `test/bridge.test.js` sends GPT prewarm and Opus turn over one WebSocket and asserts Claude receives the Opus turn; verify the installed service restarted before live acceptance.
+---
+
+---
 **Date:** 2026-09-24T13:11:00Z
 **Trigger:** Checking whether a source edit had reached the installed bridge
 **Symptom:** The log said `server.js changed; restarting when idle`, but the same PID continued serving and the earlier temporary diagnostic message remained in its log output.
@@ -36,9 +45,9 @@ Each entry looks like:
 **Date:** 2026-09-24T13:06:00Z
 **Trigger:** Opus side chat stays on Thinking, then shows an unsupported-model error
 **Symptom:** Codex desktop said `The 'claude-opus-5-5' model is not supported when using Codex with a ChatGPT account.`
-**Root cause:** The failing side-chat attempt did not produce a bridge Claude-turn log entry. A normal local Codex Opus turn reached the bridge; a CLI turn with user config ignored reproduced the exact 400. This establishes a different request/config path for the failing attempt, but not the precise desktop component responsible.
-**Fix:** Document the observed side-chat limitation and diagnostic boundary in `README.md`; do not alter bridge fork logic for a request it never receives.
-**Guard:** Controlled local Opus smoke test plus the CLI `--ignore-user-config` reproduction; check bridge logs for a matching request before future side-chat changes.
+**Root cause:** Superseded by the entry above. The attempt had no `claude turn` log because it went through a GPT-labeled WebSocket that the bridge forwarded without inspecting its messages. The CLI `--ignore-user-config` reproduction matched the error text but was not the desktop cause.
+**Fix:** The initial README documented a provisional limitation; the later per-message WebSocket route replaces it.
+**Guard:** Check WebSocket upgrade logs and the model in each message before concluding a request bypassed the bridge.
 ---
 
 ---
