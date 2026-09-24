@@ -37,6 +37,11 @@ CLAUDE="$(command -v claude || true)"
 say "node:   $NODE ($("$NODE" -v))"
 say "claude: $CLAUDE ($("$CLAUDE" --version 2>/dev/null | head -1))"
 
+# The bridge inspects each WebSocket message so a GPT-prewarmed side chat can
+# switch to Claude without sending that Claude request to OpenAI.
+command -v npm >/dev/null 2>&1 || die "npm not found. Install npm alongside Node.js."
+npm ci --omit=dev --prefix "$DIR"
+
 # --- bridge config -------------------------------------------------------------
 mkdir -p "$BRIDGE_HOME" "$(dirname "$PLIST")" "$(dirname "$LOG")"
 if [ ! -f "$BRIDGE_HOME/config.json" ]; then

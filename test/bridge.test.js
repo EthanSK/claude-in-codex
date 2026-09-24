@@ -9,6 +9,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
+import WebSocket from 'ws';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-test-'));
 process.env.CODEX_CLAUDE_BRIDGE_HOME = tmp;
@@ -430,6 +431,65 @@ test('GPT websocket traffic and auth pass through to upstream', async () => {
   assert.equal(upstreamUpgradeRequests.length, 1);
   assert.equal(upstreamUpgradeRequests[0].url, '/backend-api/codex/responses');
   assert.equal(upstreamUpgradeRequests[0].headers.authorization, 'Bearer test');
+});
+
+test('an Opus side-chat turn on a GPT-prewarmed websocket goes to Claude', async () => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`, {
+    headers: { 'x-codex-routing-hint': 'model=gpt-6-sol', authorization: 'Bearer test' },
+  });
+  await new Promise((resolve, reject) => {
+    socket.once('open', resolve);
+    socket.once('error', reject);
+  });
+  try {
+    assert.match(socket.extensions, /permessage-deflate/);
+    // Codex can prewarm a side chat as GPT, then select Opus on the same socket.
+    socket.send(JSON.stringify({ type: 'response.create', model: 'gpt-6-sol', generate: false }));
+    const prewarm = await new Promise((resolve, reject) => {
+      socket.once('message', (data) => resolve(data.toString()));
+      socket.once('error', reject);
+    });
+    assert.equal(prewarm, 'OK');
+
+    const body = JSON.parse(responsesBody('claude-opus-5-5', [envContext(workdir), userMsg('side hello')]));
+    const priorClaudeCalls = readClaudeLog().length;
+    socket.send(JSON.stringify({ type: 'response.create', ...body, generate: false }));
+    const claudePrewarm = await new Promise((resolve, reject) => {
+      const onMessage = (data) => {
+        const event = JSON.parse(data.toString());
+        if (event.type === 'response.completed') {
+          socket.off('message', onMessage);
+          resolve(event);
+        }
+      };
+      socket.on('message', onMessage);
+      socket.once('error', reject);
+    });
+    assert.equal(claudePrewarm.response.model, 'claude-opus-5-5');
+    assert.equal(readClaudeLog().length, priorClaudeCalls);
+
+    socket.send(JSON.stringify({ type: 'response.create', ...body, client_metadata: { thread_id: 'side-chat-test', turn_id: 'side-turn-test' } }));
+    const events = await new Promise((resolve, reject) => {
+      const received = [];
+      const timeout = setTimeout(() => reject(new Error('Claude websocket response timed out')), 3000);
+      const onMessage = (data) => {
+        const event = JSON.parse(data.toString());
+        received.push(event);
+        if (event.type === 'response.completed') {
+          clearTimeout(timeout);
+          socket.off('message', onMessage);
+          resolve(received);
+        }
+      };
+      socket.on('message', onMessage);
+      socket.once('error', reject);
+    });
+    assert.ok(events.some((event) => event.type === 'response.output_text.delta'));
+    assert.equal(events.at(-1).response.model, 'claude-opus-5-5');
+    assert.equal(JSON.parse(readClaudeLog().at(-1).stdin).message.content[0].text, 'side hello');
+  } finally {
+    socket.close();
+  }
 });
 
 test('browser origins cannot open a GPT websocket through the bridge', async () => {

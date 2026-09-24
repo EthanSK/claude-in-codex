@@ -12,7 +12,7 @@ Codex app ──► 127.0.0.1:18787 ──┬─ GPT model    → chatgpt.com ov
 
 1. The installer adds one line to `~/.codex/config.toml`, so Codex sends its model requests to a small local service instead of straight to OpenAI.
 2. The service adds your Claude models to Codex's model list.
-3. When you send a message, the service checks the chosen model. GPT requests go on to OpenAI unchanged. Claude requests start your `claude` CLI in the chat's project folder.
+3. When you send a message, the service checks its model, including on an already-open WebSocket. GPT requests go on to OpenAI. Claude requests start your `claude` CLI in the chat's project folder.
 4. Claude Code's output is translated into the events Codex already shows: replies, thinking, tool steps and plans. Claude edits the real files, so its changes appear in Codex's diff view as usual.
 5. Each Codex chat is tied to its own Claude Code session, so the next message carries on where the last one stopped.
 
@@ -40,9 +40,10 @@ Then **quit Codex completely (Cmd+Q) and reopen it**. Open the model picker: you
 The installer:
 
 1. Finds `node` and `claude`.
-2. Writes `~/.codex-claude-bridge/config.json`.
-3. Starts a background service on `127.0.0.1:18787` that runs at login and restarts if it crashes. Logs go to `~/Library/Logs/codex-claude-bridge.log`.
-4. Backs up `~/.codex/config.toml`, then adds one line at the top:
+2. Installs the bridge's Node dependency with `npm ci`.
+3. Writes `~/.codex-claude-bridge/config.json`.
+4. Starts a background service on `127.0.0.1:18787` that runs at login and restarts if it crashes. Logs go to `~/Library/Logs/codex-claude-bridge.log`.
+5. Backs up `~/.codex/config.toml`, then adds one line at the top:
    ```toml
    openai_base_url = "http://127.0.0.1:18787/backend-api/codex" # codex-claude-bridge
    ```
@@ -155,17 +156,17 @@ Code changes in `src/` are picked up automatically once every request and WebSoc
 - **The installer says the port is in use.** Something else is on 18787; the installer names it. Run `CODEX_CLAUDE_BRIDGE_PORT=18888 ./scripts/install.sh`. The default isn't 8787 because that's `wrangler dev`'s default.
 - **Claude is selected but GPT answers.** Update the bridge (`git pull`); Codex's request format changes between versions. Then check the log for `claude turn model=…` lines.
 - **"Claude Code stopped: …" in a reply.** That's Claude Code's own error (auth, usage limit, unknown model name). Run the same model in a terminal with `claude -p --model <name> "hi"` to see it directly.
-- **An Opus side chat stays on Thinking or says the model is unsupported with a ChatGPT account.** A Codex desktop side chat produced that error before the bridge saw a Claude turn, even though a normal local Opus turn worked. The bridge cannot route a request it does not receive. Use a full local Codex chat for Opus, or choose GPT for that side chat. If a future Codex update changes this, compare the side chat's timestamp with `claude turn` in the bridge log before changing the bridge. A local CLI run with user config ignored reproduced the same error, but that does not prove exactly where the desktop side chat drops the config.
+- **An Opus side chat says the model is unsupported with a ChatGPT account.** Update and reinstall the bridge. Codex can prewarm a side chat over a GPT WebSocket, then send an Opus request on that same socket. Older bridge versions forwarded the entire socket to OpenAI based on the handshake's GPT hint. The bridge now checks each message and routes Opus to Claude Code. If the error persists, compare its timestamp with `claude turn` and `proxied GPT websocket` in the bridge log.
 - **Logs:** `tail -f ~/Library/Logs/codex-claude-bridge.log`
 
 ## Limits
 
 - Claude's tool calls don't go through Codex's approval prompts. Permissions come from the mapping above.
-- Codex 0.155 (tested here) tells the bridge which model is connecting in the WebSocket handshake. GPT connections are passed through to OpenAI over WebSocket; Claude still uses HTTP. Older Codex versions that omit that model hint use HTTP for both. The bridge remains a local hop, and its latency versus a direct GPT connection has not been measured.
-- Forked Claude sessions work when Codex sends their requests to the bridge; this does not guarantee that every desktop side-chat surface uses the configured bridge.
+- Codex 0.155 (tested here) tells the bridge which model is connecting in the WebSocket handshake. On GPT connections, the bridge checks each message: GPT remains on WebSocket and Claude is handled locally even if the connection was prewarmed as GPT. Claude model hints and older clients without a hint use HTTP. The bridge remains a local hop, and its latency versus a direct GPT connection has not been measured.
+- Forked Claude sessions that reach the bridge get their own Claude session.
 - The Computer Use MCP server runs through Claude Code's tool permissions, not Codex's own tool approval prompts. Its browser and desktop actions are available, but this does not give Claude every Codex app tool.
 - This depends on Codex's internal request format, which can change with Codex updates. The tests pin the shapes the bridge relies on.
-- Model requests on the configured local Codex route go through the bridge, GPT included. If the service isn't running, GPT on that route stops working too. `./scripts/uninstall.sh` restores Codex's direct OpenAI route; the observed desktop side-chat failure above took a different path.
+- Model requests on the configured local Codex route go through the bridge, GPT included. If the service isn't running, GPT on that route stops working too. `./scripts/uninstall.sh` restores Codex's direct OpenAI route.
 - Codex's desktop-app instructions aren't passed to Claude. Claude Code's own memory still applies alongside the Codex memory block when one is supplied.
 
 ### Can GPT bypass the bridge?
@@ -174,9 +175,9 @@ Not while keeping Claude and GPT in this same model picker with this configurati
 
 ## Other platforms
 
-The server is plain Node with no dependencies. On Linux or Windows:
+The server runs on Node with one WebSocket dependency. On Linux or Windows:
 
-1. Run it yourself: `node src/server.js`.
+1. Run `npm ci`, then start it yourself: `node src/server.js`.
 2. Add the `openai_base_url` line above to `~/.codex/config.toml`.
 3. Restart Codex.
 
@@ -185,7 +186,7 @@ The server is plain Node with no dependencies. On Linux or Windows:
 The bridge is an OpenAI Responses API endpoint on localhost:
 
 - **`GET /models`** fetches Codex's normal model catalog and adds the Claude models.
-- **`GET /responses` WebSocket upgrade with a GPT model hint** is passed through to OpenAI as a WebSocket connection, including Codex's own authentication. Claude model hints and older clients without a hint get HTTP fallback.
+- **`GET /responses` WebSocket upgrade with a GPT model hint** is accepted locally. The bridge forwards GPT messages to OpenAI over WebSocket with Codex's authentication and handles any Claude message on that same connection with Claude Code. Claude model hints and older clients without a hint get HTTP fallback.
 - **`POST /responses` with a GPT model** is forwarded to OpenAI untouched, apart from removing bridge-only items from the history.
 - **`POST /responses` with a Claude model** runs `claude -p --input-format stream-json --output-format stream-json --resume <session>` and translates Claude Code's events into the Responses events Codex renders: text, reasoning summaries, web search calls and plan blocks. An invisible marker in each reply ties a Codex chat to its Claude session.
 

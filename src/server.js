@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import http from 'node:http';
-import https from 'node:https';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { EventEmitter } from 'node:events';
+import WebSocket, { WebSocketServer } from 'ws';
 import { loadConfig, BASE_PATH, BRIDGE_HOME } from './config.js';
 import { State } from './state.js';
 import { parseCodexRequest, buildClaudeUserMessage, sanitizeInputForOpenAI, makeMarker } from './codexInput.js';
@@ -42,6 +43,40 @@ function readBody(req) {
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
+}
+
+// ResponsesStream writes complete SSE events. This adapter sends the same event
+// JSON over a WebSocket when Codex changes models on an already-open GPT socket.
+class WebSocketResponse extends EventEmitter {
+  constructor(socket) {
+    super();
+    this.socket = socket;
+    this.writableEnded = false;
+    this.writableFinished = false;
+    this.destroyed = false;
+    this.onSocketClose = () => {
+      this.destroyed = true;
+      this.emit('close');
+    };
+    socket.on('close', this.onSocketClose);
+  }
+
+  writeHead() {}
+
+  write(event) {
+    if (this.destroyed || this.writableEnded || this.socket.readyState !== WebSocket.OPEN) return false;
+    const data = String(event).split('\n').find((line) => line.startsWith('data: '));
+    if (data) this.socket.send(data.slice(6));
+    return true;
+  }
+
+  end() {
+    if (this.writableEnded) return;
+    this.writableEnded = true;
+    this.writableFinished = true;
+    this.socket.off('close', this.onSocketClose);
+    this.emit('close');
+  }
 }
 
 export function decodeBody(raw, encoding) {
@@ -241,46 +276,82 @@ export function createBridge(config = loadConfig(), state = new State()) {
     if (!model || isClaude(model)) return rejectWebSocket(socket);
 
     const target = new URL(`${config.upstream}/responses${url.search}`);
+    target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
     const headers = { ...req.headers };
-    delete headers.host;
+    for (const key of Object.keys(headers)) {
+      if (['host', 'connection', 'upgrade', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions'].includes(key)) delete headers[key];
+    }
     socket.pause();
-    const request = (target.protocol === 'https:' ? https : http).request(target, {
-      method: 'GET',
-      headers,
+    const upstream = new WebSocket(target, { headers, perMessageDeflate: true, handshakeTimeout: 15000 });
+    let upstreamResponse;
+    let client;
+    upstream.on('upgrade', (response) => { upstreamResponse = response; });
+    upstream.on('open', () => {
+      const wss = new WebSocketServer({ noServer: true, perMessageDeflate: true });
+      wss.on('headers', (responseHeaders) => {
+        // Keep Codex's routing and capability headers; ws creates its own handshake headers.
+        for (let i = 0; i < upstreamResponse.rawHeaders.length; i += 2) {
+          const name = upstreamResponse.rawHeaders[i];
+          if (!/^(?:upgrade|connection|content-length|sec-websocket-.*)$/i.test(name)) {
+            responseHeaders.push(`${name}: ${upstreamResponse.rawHeaders[i + 1]}`);
+          }
+        }
+      });
+      wss.handleUpgrade(req, socket, head, (connectedClient) => {
+        client = connectedClient;
+        log.info(`proxied GPT websocket model=${model}`);
+        socket.resume();
+        client.on('message', (data, isBinary) => {
+          let body;
+          try { body = isBinary ? null : JSON.parse(data.toString()); } catch { body = null; }
+          const modelCfg = claudeSlugs.get(body?.model);
+          if (!modelCfg) return upstream.send(data, { binary: isBinary });
+          if (body.generate === false) {
+            // Codex prewarms a connection without asking the model to answer.
+            const stream = new ResponsesStream(new WebSocketResponse(client), { model: body.model });
+            stream.begin();
+            stream.complete(usageObject());
+            return;
+          }
+          if (!isAgentTurn(body)) {
+            body.model = fallbackGptModel(config, state);
+            if (body.reasoning?.effort && !['low', 'medium', 'high'].includes(body.reasoning.effort)) body.reasoning.effort = 'medium';
+            if (Array.isArray(body.input)) body.input = sanitizeInputForOpenAI(body.input).input;
+            return upstream.send(JSON.stringify(body));
+          }
+          // The handshake can prewarm GPT before the side chat switches to Claude.
+          // Route by each message's model, never by the handshake hint alone.
+          const metadata = body.client_metadata || {};
+          const turnReq = {
+            headers: {
+              ...req.headers,
+              'thread-id': metadata.thread_id || req.headers['thread-id'],
+              'turn-id': metadata.turn_id || req.headers['turn-id'],
+            },
+          };
+          const response = new WebSocketResponse(client);
+          handleClaudeResponses(turnReq, response, body, modelCfg).catch((error) => {
+            log.error(`Claude websocket turn crashed: ${error.stack || error}`);
+            if (client.readyState === WebSocket.OPEN) client.close(1011, 'Claude turn failed');
+          });
+        });
+        upstream.on('message', (data, isBinary) => {
+          if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
+        });
+        client.on('close', () => upstream.close());
+        upstream.on('close', () => client.close());
+      });
     });
-    let upstreamSocket;
-    const fail = (status) => {
-      if (!socket.destroyed && !upstreamSocket) rejectWebSocket(socket, status);
-    };
-    request.on('upgrade', (response, connectedSocket, upstreamHead) => {
-      upstreamSocket = connectedSocket;
-      log.info(`proxied GPT websocket model=${model}`);
-      const responseHeaders = [];
-      for (let i = 0; i < response.rawHeaders.length; i += 2) {
-        responseHeaders.push(`${response.rawHeaders[i]}: ${response.rawHeaders[i + 1]}`);
-      }
-      socket.write(`HTTP/1.1 101 Switching Protocols\r\n${responseHeaders.join('\r\n')}\r\n\r\n`);
-      if (upstreamHead.length) socket.write(upstreamHead);
-      if (head.length) connectedSocket.write(head);
-      socket.pipe(connectedSocket).pipe(socket);
-      socket.resume();
-      socket.on('end', () => connectedSocket.destroy());
-      socket.on('close', () => connectedSocket.destroy());
-      connectedSocket.on('end', () => socket.destroy());
-      connectedSocket.on('close', () => socket.destroy());
-      connectedSocket.on('error', () => socket.destroy());
-    });
-    request.on('response', (response) => {
+    upstream.on('unexpected-response', (_request, response) => {
       response.resume();
-      fail(`${response.statusCode} ${response.statusMessage}`);
+      rejectWebSocket(socket, `${response.statusCode} ${response.statusMessage}`);
     });
-    request.on('error', (error) => {
+    upstream.on('error', (error) => {
       log.error(`GPT websocket upstream failed: ${error.message}`);
-      fail('502 Bad Gateway');
+      if (client) client.close(1011, 'Upstream WebSocket failed');
+      else if (!socket.destroyed) rejectWebSocket(socket, '502 Bad Gateway');
     });
-    socket.on('close', () => request.destroy());
-    socket.on('error', () => request.destroy());
-    request.end();
+    socket.on('close', () => upstream.terminate());
   }
 
   async function handle(req, res) {
