@@ -106,7 +106,7 @@ function renderContextItem(item) {
   if (item.type === 'message') {
     if (item.role === 'assistant') {
       const t = textOf(item).trim();
-      return t ? `Assistant (another model in this Codex thread):\n${t}` : null;
+      return t ? `Assistant (earlier in this Codex thread):\n${t}` : null;
     }
     if (item.role === 'user') {
       const parts = [];
@@ -221,7 +221,7 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
 
   const contextLines = [];
   for (const it of newItems.slice(0, promptStart)) {
-    if (isBridgeItem(it)) continue;
+    if (isBridgeItem(it) && it.type !== 'message') continue; // A fresh session still needs earlier Claude replies; only bridge control items are omitted.
     const line = renderContextItem(it);
     if (line) contextLines.push(line);
   }

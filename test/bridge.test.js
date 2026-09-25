@@ -119,6 +119,22 @@ function parseSse(data) {
     .map((b) => JSON.parse(b.split('\n').find((l) => l.startsWith('data: ')).slice(6)));
 }
 
+function webSocketTurn(socket, body) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { socket.off('message', onMessage); reject(new Error('WebSocket turn timed out')); }, 3000);
+    const onMessage = (data) => {
+      const event = JSON.parse(data.toString());
+      if (event.type === 'response.completed' || event.type === 'error') {
+        clearTimeout(timeout);
+        socket.off('message', onMessage);
+        resolve(event);
+      }
+    };
+    socket.on('message', onMessage);
+    socket.send(JSON.stringify({ type: 'response.create', ...body }));
+  });
+}
+
 function envContext(cwd) {
   return {
     type: 'message',
@@ -340,6 +356,7 @@ test('rollback to an earlier point starts a fresh session with the transcript', 
   assert.equal(calls.length, 3);
   assert.ok(calls[1].args.includes('--resume'));
   assert.ok(!calls[2].args.includes('--resume'), 'stale marker -> new session');
+  assert.match(JSON.parse(calls[2].stdin).message.content[0].text, /Assistant \(earlier in this Codex thread\):\nDone\./);
   const text = JSON.parse(calls[2].stdin).message.content[0].text;
   assert.match(text, /<codex_context>/);
   assert.match(text, /User:\nfirst/);
@@ -648,6 +665,63 @@ test('an Opus side-chat turn on a GPT-prewarmed websocket goes to Claude', async
   } finally {
     socket.close();
   }
+});
+
+test('side-chat delta requests retain prewarm context, resume Claude, and replay history on a GPT switch', async () => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`);
+  await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+  const body = (input, extra = {}) => JSON.parse(responsesBody('claude-opus-5-5', input, extra));
+  try {
+    const before = readClaudeLog().length;
+    const prewarm = await webSocketTurn(socket, body([perms, agents, envContext(workdir)], { generate: false }));
+    assert.equal(readClaudeLog().length, before);
+    const first = await webSocketTurn(socket, body([userMsg('remember apricot')], { previous_response_id: prewarm.response.id }));
+    const firstCall = readClaudeLog().at(-1);
+    assert.equal(firstCall.cwd, fs.realpathSync(workdir));
+    assert.ok(firstCall.args.includes('--dangerously-skip-permissions'));
+    assert.ok(firstCall.args[firstCall.args.indexOf('--append-system-prompt') + 1].includes('Be terse.'));
+    const sid = first.response.output.find((item) => item.encrypted_content?.startsWith('ccb:v1:')).encrypted_content.split(':')[2];
+    const second = await webSocketTurn(socket, body([userMsg('what word?')], { previous_response_id: first.response.id }));
+    const secondCall = readClaudeLog().at(-1);
+    assert.equal(secondCall.args[secondCall.args.indexOf('--resume') + 1], sid);
+    assert.equal(secondCall.cwd, fs.realpathSync(workdir));
+    assert.ok(secondCall.args.includes('--dangerously-skip-permissions'));
+    assert.equal(JSON.parse(secondCall.stdin).message.content[0].text, 'what word?');
+
+    upstreamWsData = Buffer.alloc(0);
+    const gptReply = new Promise((resolve) => socket.once('message', (data) => resolve(data.toString())));
+    socket.send(JSON.stringify({ type: 'response.create', model: 'gpt-6-sol', previous_response_id: second.response.id, input: [userMsg('GPT continues')] }));
+    assert.equal(await gptReply, 'OK');
+    const forwarded = JSON.parse(decodeClientTextFrames(upstreamWsData).at(-1));
+    assert.equal(forwarded.previous_response_id, undefined);
+    assert.match(JSON.stringify(forwarded.input), /remember apricot/);
+    assert.match(JSON.stringify(forwarded.input), /what word\?/);
+    assert.match(JSON.stringify(forwarded.input), /GPT continues/);
+    assert.doesNotMatch(JSON.stringify(forwarded), /ccb:v1:|msg_ccb_|rs_ccb_/);
+  } finally { socket.close(); }
+});
+
+test('side-chat response caches stay separate and unknown response IDs require full-context replay', async () => {
+  const sockets = [new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`), new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`)];
+  await Promise.all(sockets.map((socket) => new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); })));
+  const body = (text, previous_response_id) => JSON.parse(responsesBody('claude-opus-5-5', [userMsg(text)], { previous_response_id }));
+  try {
+    const a = await webSocketTurn(sockets[0], body('chat A'));
+    const b = await webSocketTurn(sockets[1], body('chat B'));
+    const before = readClaudeLog().length;
+    const wrongSocket = await webSocketTurn(sockets[1], body('wrong parent', a.response.id));
+    assert.equal(wrongSocket.error.code, 'previous_response_not_found');
+    assert.equal(readClaudeLog().length, before);
+    for (const [index, first] of [a, b].entries()) {
+      await webSocketTurn(sockets[index], body('continue', first.response.id));
+      const sid = first.response.output.find((item) => item.encrypted_content?.startsWith('ccb:v1:')).encrypted_content.split(':')[2];
+      const args = readClaudeLog().at(-1).args;
+      assert.equal(args[args.indexOf('--resume') + 1], sid);
+    }
+    const httpResult = await request('/backend-api/codex/responses', { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body('missing history', a.response.id)) });
+    assert.equal(httpResult.status, 400);
+    assert.equal(JSON.parse(httpResult.data).error.code, 'previous_response_not_found');
+  } finally { sockets.forEach((socket) => socket.close()); }
 });
 
 test('GPT websocket frames drop bridge-only items, so a side chat off a Claude-compacted thread works', async () => {

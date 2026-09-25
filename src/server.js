@@ -48,9 +48,10 @@ function readBody(req) {
 // ResponsesStream writes complete SSE events. This adapter sends the same event
 // JSON over a WebSocket for Claude turns, including model switches on an open socket.
 class WebSocketResponse extends EventEmitter {
-  constructor(socket) {
+  constructor(socket, onCompleted) {
     super();
     this.socket = socket;
+    this.onCompleted = onCompleted;
     this.writableEnded = false;
     this.writableFinished = false;
     this.destroyed = false;
@@ -66,7 +67,12 @@ class WebSocketResponse extends EventEmitter {
   write(event) {
     if (this.destroyed || this.writableEnded || this.socket.readyState !== WebSocket.OPEN) return false;
     const data = String(event).split('\n').find((line) => line.startsWith('data: '));
-    if (data) this.socket.send(data.slice(6));
+    if (data) {
+      const json = data.slice(6);
+      const event = JSON.parse(json);
+      if (event.type === 'response.completed') this.onCompleted?.(event.response); // Save context before the client can send its next delta.
+      this.socket.send(json);
+    }
     return true;
   }
 
@@ -116,6 +122,11 @@ export function createBridge(config = loadConfig(), state = new State()) {
   const log = makeLogger(config.logLevel);
   const claudeSlugs = new Map(config.models.map((m) => [m.slug, m]));
   const isClaude = (model) => claudeSlugs.has(model);
+  const lastClaudeResponses = new WeakMap(); // Responses with store=false live only on their socket, never in the on-disk session index.
+
+  function previousResponseError(id) {
+    return { type: 'invalid_request_error', code: 'previous_response_not_found', message: `Previous response with id '${id}' not found.`, param: 'previous_response_id' };
+  }
 
   function forwardHeaders(req, { bodyRewritten }) {
     const headers = {};
@@ -197,9 +208,14 @@ export function createBridge(config = loadConfig(), state = new State()) {
   }
 
   async function handleClaudeResponses(req, res, body, modelCfg) {
+    if (body.previous_response_id) { // HTTP has no connection cache; require replay rather than silently losing earlier context.
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: previousResponseError(body.previous_response_id) }));
+      return;
+    }
     const parsed = parseCodexRequest(body, (sid, turnId) => state.isLatestTurn(sid, turnId));
     // Log request structure, never prompt text or credentials, when tracing missing side-chat context.
-    log.debug(`Claude request shape ${JSON.stringify({ previousResponseId: body.previous_response_id || null, keys: Object.keys(body), input: Array.isArray(body.input) ? body.input.map((item) => ({ type: item.type, role: item.role, contentType: typeof item.content, marker: typeof item.encrypted_content === 'string' && item.encrypted_content.startsWith('ccb:v1:') })) : typeof body.input, sandboxMode: parsed.sandboxMode, hasCwd: Boolean(parsed.cwd), hasResume: Boolean(parsed.resume) })}`);
+    log.debug(`Claude request shape ${JSON.stringify({ keys: Object.keys(body), inputCount: Array.isArray(body.input) ? body.input.length : 0, sandboxMode: parsed.sandboxMode, hasCwd: Boolean(parsed.cwd), hasResume: Boolean(parsed.resume) })}`);
     // Side chats / forked threads start from the parent's history: give them their own
     // fork of the parent's Claude session instead of taking over the parent's session.
     const threadId = String(req.headers['thread-id'] || req.headers['session-id'] || body.prompt_cache_key || '') || null;
@@ -270,6 +286,16 @@ export function createBridge(config = loadConfig(), state = new State()) {
     let body;
     try { body = isBinary ? null : JSON.parse(data.toString()); } catch { body = null; }
     const modelCfg = claudeSlugs.get(body?.model);
+    if (body?.previous_response_id && (modelCfg || body.previous_response_id.startsWith('resp_ccb_'))) {
+      const previous = lastClaudeResponses.get(client);
+      if (previous?.id !== body.previous_response_id) { // Reconnects or GPT-owned parents need the client to replay its full context.
+        client.send(JSON.stringify({ type: 'error', status: 400, error: previousResponseError(body.previous_response_id) }));
+        return;
+      }
+      body = { ...body, input: [...previous.input, ...(body.input || [])] };
+      delete body.previous_response_id;
+      data = JSON.stringify(body); // GPT switches must also send reconstructed history, not a bridge-owned response ID.
+    }
     if (!modelCfg) {
       // GPT frame. Strip bridge-minted items first, exactly like the HTTP path in
       // handle() does. Bug fixed 2026-09-24: this path used to forward frames
@@ -286,8 +312,9 @@ export function createBridge(config = loadConfig(), state = new State()) {
       }
       return forwardGpt(data, isBinary, body?.model);
     }
+    const onCompleted = (response) => lastClaudeResponses.set(client, { id: response.id, input: [...(body.input || []), ...response.output] });
     if (body.generate === false) {
-      const stream = new ResponsesStream(new WebSocketResponse(client), { model: body.model });
+      const stream = new ResponsesStream(new WebSocketResponse(client, onCompleted), { model: body.model });
       stream.begin();
       stream.complete(usageObject());
       return;
@@ -306,7 +333,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
         'turn-id': metadata.turn_id || req.headers['turn-id'],
       },
     };
-    const response = new WebSocketResponse(client);
+    const response = new WebSocketResponse(client, onCompleted);
     handleClaudeResponses(turnReq, response, body, modelCfg).catch((error) => {
       log.error(`Claude websocket turn crashed: ${error.stack || error}`);
       if (client.readyState === WebSocket.OPEN) client.close(1011, 'Claude turn failed');

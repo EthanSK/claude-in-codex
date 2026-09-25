@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-25T11:59:00Z
+**Trigger:** Opus said it could not see a test word supplied in the immediately preceding side-chat message
+**Symptom:** Successive turns in one side chat started new Claude sessions, lost the working directory and permission instructions, and received only the newest user message.
+**Root cause:** Codex sent `previous_response_id: resp_ccb_…` with a one-message input delta; the bridge ignored the reference. A separate full-replay path also discarded earlier bridge-authored assistant messages along with control items.
+**Fix:** `src/server.js` retains the latest Claude response input/output per WebSocket, reconstructs referenced input before parsing, and returns `previous_response_not_found` for an uncached reference. GPT switches replay sanitized context instead of forwarding a bridge-owned response ID. `src/codexInput.js` preserves prior Claude reply text when rebuilding a session.
+**Guard:** Regression tests cover prewarm context, delta resume, per-connection isolation, unknown-reference errors, GPT switches, and earlier-reply retention. Real Opus tests on both an isolated and the installed bridge answered `apricot` from a delta-only follow-up, with the same Claude session ID on both turns. Already-lost context must be restated once; do not claim this reconstructs information absent from a damaged Claude session.
+---
+
+---
 **Date:** 2026-09-25T11:51:00Z
 **Trigger:** Claude side chats denied Bash because approval was required; user requested full bridge permissions
 **Symptom:** Real turns logged `mode=acceptEdits`; Claude reported that a tool needed approval but the session could not ask.
