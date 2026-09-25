@@ -20,14 +20,31 @@ const BRIDGE_NOTE = [
   'You are running inside the Codex desktop app through a local bridge; the user picked you in Codex\'s model picker.',
   'The user sees your text replies and a one-line summary of each tool you use; they do not see raw tool output.',
   'Codex renders Markdown. Refer to files by path relative to the working directory.',
-  'You cannot show interactive permission prompts or ask multiple-choice questions here: if you need a decision, ask in plain text and end your turn.',
 ].join('\n');
+
+// Without Codex's question tool (older Codex, or a request that does not offer it), questions have to be plain text.
+const PLAIN_TEXT_QUESTIONS_NOTE = 'You cannot show interactive permission prompts or ask multiple-choice questions here: if you need a decision, ask in plain text and end your turn.';
 
 const CODEX_TOOLS_NOTE = [
   `Tools named \`mcp__${CODEX_TOOLS_SERVER}__*\` are the Codex app's own tools, the same ones Codex gives GPT. Codex runs them itself, shows them in its UI and applies its own approvals.`,
   'Use them for abilities only Codex has, such as the task and app tools inside `exec` (filter `ALL_TOOLS` there to find them), Computer Use and the in-app browser, Codex sub-agents, and asking the user questions when that tool is offered.',
   'Prefer your built-in tools for ordinary file and shell work.',
 ].join('\n');
+
+/**
+ * Tells Claude to ask through Codex's question card instead of Claude Code's AskUserQuestion, which Codex cannot show.
+ * The desktop app offers `request_user_input_async` (it only accepts the question; the answer arrives later as a user
+ * message), while the CLI offers `request_user_input` (the answer is the tool result).
+ */
+function codexQuestionsNote(questionTool) {
+  const lines = [
+    `You cannot show interactive permission prompts here. To ask the user for a decision, preference or clarification, call \`mcp__${CODEX_TOOLS_SERVER}__${questionTool.mcpTool.name}\` instead of asking in plain text: Codex shows it as a question card the user answers with a click. Prefer short multiple-choice options. If Codex refuses the tool, ask in plain text instead and end your turn.`, // Seen live: the CLI's request_user_input only works in Plan mode.
+  ];
+  if (questionTool.name.endsWith('_async')) {
+    lines.push('It returns `{"accepted":true}` straight away. The answer arrives later as a user message wrapped in `<send_user_message_question_reply>`, either attached to a later Codex tool result or as your next turn. Keep doing work that does not depend on the answer; if you cannot continue without it, say so and end your turn.');
+  }
+  return lines.join(' ');
+}
 
 const EFFORT = {
   none: 'low',
@@ -134,7 +151,11 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       ? `The user's Codex skills are listed below. They are in addition to your own Claude Code skills. When a task matches one, read its SKILL.md with the Read tool and follow it, exactly as you would one of your own skills. When the user names a skill (e.g. $name), use it.\n\n${parsed.skills}`
       : '';
     const catalog = codexToolCatalog(codexTools);
-    const system = [BRIDGE_NOTE, catalog.size ? CODEX_TOOLS_NOTE : '', config.extraSystemPrompt, ...parsed.agentsMd, skills, parsed.codexMemory]
+    const questionTool = catalog.get('request_user_input_async') ?? catalog.get('request_user_input'); // The desktop's async card works in every mode; the CLI's request_user_input is Plan-mode only.
+    // Claude Code's own question tool has nowhere to appear in Codex, so Codex's question card replaces it.
+    if (questionTool) args.push('--disallowedTools', 'AskUserQuestion');
+    const questionsNote = questionTool ? codexQuestionsNote(questionTool) : PLAIN_TEXT_QUESTIONS_NOTE;
+    const system = [BRIDGE_NOTE, questionsNote, catalog.size ? CODEX_TOOLS_NOTE : '', config.extraSystemPrompt, ...parsed.agentsMd, skills, parsed.codexMemory]
       .filter(Boolean)
       .join('\n\n');
     args.push('--append-system-prompt', system);

@@ -170,7 +170,7 @@ export function findCodexResults(input) {
     for (const part of item.content || []) {
       if (part?.type !== 'input_text') continue;
       const kind = classifyUserText(part.text);
-      if (kind === 'prompt') userText.push(part.text);
+      if (kind === 'prompt' || kind === 'context') userText.push(part.text); // A message can start with Codex context (for example the in-app browser's) before the user's request; dropping it would lose that request.
       else if (kind === 'aborted') userText.push('(The user stopped the turn while this tool was running.)');
     }
   }

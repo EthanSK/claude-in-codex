@@ -49,6 +49,7 @@ export function classifyUserText(text) {
   if (tag === 'user_instructions') return 'agents_md';
   if (tag === 'turn_aborted') return 'aborted';
   if (tag === 'image') return 'prompt';
+  if (tag === 'send_user_message_question_reply') return 'prompt'; // The user's answer to a Codex question card is their own words, not injected context.
   return 'context';
 }
 

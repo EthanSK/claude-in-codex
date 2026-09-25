@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-25T20:10:00Z
+**Trigger:** User asked for bridged Claude's questions to use Codex's question UI, because Claude Code's question tool has a different format
+**Symptom:** Claude was told to ask only in plain text. With the Codex tool handoff, an answer arriving during a tool run would also have been dropped, and one starting a new turn reached Claude only as background context with a "(continue)" prompt.
+**Root cause:** The desktop app's `request_user_input_async` returns `{"accepted":true}` at once and later sends the answer as a user message starting with `<send_user_message_question_reply>`. The bridge treated any tag-led user text as injected context, and only plain prompts were attached to tool results. A real Opus run also showed that the CLI's sync `request_user_input` is refused outside Plan mode.
+**Fix:** `src/codexInput.js` classifies the reply tag as the user's prompt; `src/codexTools.js` attaches context-led messages to tool results as well; `src/claudeRunner.js` prefers `request_user_input_async`, tells Claude to ask through it (falling back to plain text when Codex refuses) and passes `--disallowedTools AskUserQuestion`.
+**Guard:** Tests for the desktop question flow, the reply classification and the plain-text case without a question tool. The desktop card itself still needs a live check after the service reloads.
+---
+
+---
 **Date:** 2026-09-25T17:30:00Z
 **Trigger:** User asked for the bridge to stop relaying Codex tools through Claude-launched connections so bridged Claude gets Codex's task tools and in-app browser
 **Symptom:** Claude-launched MCP clients were rejected by the desktop app-tools pipe (code-signing peer check). The in-app browser was also unavailable to the direct Computer Use proxy.

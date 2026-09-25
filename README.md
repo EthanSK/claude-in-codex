@@ -105,6 +105,7 @@ Other details:
 - Codex applies its own approval policy to these calls, so they are pre-approved in Claude (`--allowedTools mcp__codex`). Plan mode is the exception: there, Claude's read-only rules still apply.
 - Codex's `exec` tool lists every nested tool in its description, about 17 KB. For bridged turns the bridge raises Claude Code's 2,048-character MCP description limit (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`) to the longest Codex description. That higher limit also applies to your other MCP servers in those turns.
 - One MCP call can wait up to 24 hours (`MCP_TOOL_TIMEOUT`), because some tools wait on you, such as a question.
+- Questions use Codex's question card, not Claude Code's own `AskUserQuestion`, which Codex can't show; the bridge turns that tool off when Codex offers a card. The desktop app's `request_user_input_async` only accepts the question, and your answer reaches Claude as your message, attached to a later tool result or starting its next turn. The CLI's `request_user_input` only works in Plan mode, so elsewhere Claude asks in plain text.
 - A message you send while a tool runs is added to that tool's result. So is one sent after stopping the turn, if Codex returned the results.
 - If a new message arrives on the task without those results, the bridge stops the waiting Claude process. It then resumes the session normally, and the unanswered call and anything Codex recorded appear as context.
 

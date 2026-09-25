@@ -896,6 +896,8 @@ test('Claude calls Codex tools that Codex runs, and the same Claude process cont
     assert.equal(mcpConfig.mcpServers.cua_repl, undefined, 'Codex runs Computer Use itself when it offers it');
     assert.equal(claudeCall.args[claudeCall.args.indexOf('--allowedTools') + 1], 'mcp__codex');
     assert.match(claudeCall.args[claudeCall.args.indexOf('--append-system-prompt') + 1], /Codex app's own tools/);
+    assert.match(claudeCall.args[claudeCall.args.indexOf('--append-system-prompt') + 1], /call `mcp__codex__request_user_input` instead of asking in plain text/);
+    assert.equal(claudeCall.args[claudeCall.args.indexOf('--disallowedTools') + 1], 'AskUserQuestion', 'Codex cannot show Claude Code\'s own question tool');
     const listed = codexToolsLog()[0];
     assert.deepEqual(listed.tools.map((tool) => tool.name), ['request_user_input', 'codex_app__list_threads', 'cua_repl__js', 'exec']);
     assert.deepEqual(listed.tools.find((tool) => tool.name === 'exec').inputSchema.required, ['input']);
@@ -955,6 +957,52 @@ test('a new message without the tool results stops the waiting Claude turn befor
   } finally {
     delete process.env.FAKE_CLAUDE_SCENARIO;
   }
+});
+
+test('Claude asks through the desktop question card, and the answer reaches it during a later tool result', async () => {
+  process.env.FAKE_CLAUDE_SCENARIO = 'codex-tools';
+  process.env.FAKE_CODEX_TOOL = 'request_user_input_async';
+  try {
+    fs.rmSync(claudeLog, { force: true });
+    const headers = { 'content-type': 'application/json', 'thread-id': 'question-thread' };
+    const desktopTools = [{ type: 'function', name: 'request_user_input_async', description: 'Ask the user.', parameters: { type: 'object', properties: { questions: { type: 'array' } } } }];
+    const input1 = [perms, envContext(workdir), userMsg('pick a colour with me')];
+    const first = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', input1, { tools: desktopTools }) });
+    const firstItems = doneItems(first.data);
+    const call = firstItems.find((item) => item.type === 'function_call');
+    assert.equal(call.name, 'request_user_input_async');
+    const system = readClaudeLog()[0].args[readClaudeLog()[0].args.indexOf('--append-system-prompt') + 1];
+    assert.match(system, /mcp__codex__request_user_input_async/);
+    assert.match(system, /<send_user_message_question_reply>/);
+    assert.doesNotMatch(system, /ask multiple-choice questions here/);
+
+    // Codex accepts the question at once; the answer and a context-led message follow as the user's messages.
+    const reply = '<send_user_message_question_reply>\n[{"question":"Which colour?","answer":"Blue"}]\n</send_user_message_question_reply>';
+    const browserRequest = '<in-app-browser-context source="ambient-ui-state">\nOne browser tab.\n</in-app-browser-context>\n\n## My request:\nmake it darker';
+    const output = { type: 'function_call_output', call_id: call.call_id, output: '{"accepted":true}' };
+    const second = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', [...input1, ...firstItems, output, userMsg(reply), userMsg(browserRequest)], { tools: desktopTools }) });
+    const final = doneItems(second.data).find((item) => item.type === 'message').content[0].text;
+    assert.match(final, /Codex said: \{"accepted":true\}/);
+    assert.match(final, /"answer":"Blue"/);
+    assert.match(final, /## My request:\nmake it darker/);
+  } finally {
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+    delete process.env.FAKE_CODEX_TOOL;
+  }
+});
+
+test('a question-card answer starting a new turn is the user\'s prompt, not background context', async () => {
+  const { classifyUserText } = await import('../src/codexInput.js');
+  assert.equal(classifyUserText('<send_user_message_question_reply>\n[{"answer":"Blue"}]\n</send_user_message_question_reply>'), 'prompt');
+  assert.equal(classifyUserText('<environment_context><cwd>/x</cwd></environment_context>'), 'environment');
+});
+
+test('without Codex\'s question tool, Claude is told to ask in plain text and keeps its own tools', async () => {
+  fs.rmSync(claudeLog, { force: true });
+  await request('/backend-api/codex/responses', { headers: { 'content-type': 'application/json' }, body: responsesBody('claude-opus-5-5', [perms, envContext(workdir), userMsg('hi')]) });
+  const args = readClaudeLog()[0].args;
+  assert.match(args[args.indexOf('--append-system-prompt') + 1], /ask in plain text and end your turn/);
+  assert.ok(!args.includes('--disallowedTools'));
 });
 
 test('GPT requests keep bridge-made Codex tool calls, without their bridge ids', async () => {
