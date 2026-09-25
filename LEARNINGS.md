@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-25T17:05:00Z
+**Trigger:** User requested Codex task tools (pinning, renaming and task messaging) and Computer Use for bridged Claude
+**Symptom:** Claude has permission bypass but lacks Codex app tools; Computer Use surfaces differ from Codex's own executor.
+**Root cause:** The current bridge runs Claude Code's tool loop instead of emitting tool calls for Codex's executor. The bundled app-tools MCP server additionally uses a desktop native pipe with peer authentication. A standalone client could enumerate 47 app tools and read the current task, but two real Opus integration turns failed to connect, alongside `untrusted-code-signing-identity` rejections in the desktop log. The exact reason the standalone and Claude-launched paths differ is not established.
+**Fix:** No app-tools integration shipped. Removed the experimental proxy and restored production source; documented the remaining limitation. A real Opus `cua.getState()` succeeded for desktop/Chrome inventory. A separate Opus in-app browser creation returned `Browser is not available: iab`; Codex's own Computer Use inventory included the same task's in-app browser. No test page was created or clicked, and no existing browser page was changed.
+**Guard:** Tool discovery and fake-server tests do not prove a real Claude turn can call the tools. Verify the actual runner and each claimed browser surface before enabling an integration. Preserve native peer authentication; do not claim that permission bypass adds missing harness tools or that inventory proves input actions work.
+---
+
+---
 **Date:** 2026-09-25T11:59:00Z
 **Trigger:** Opus said it could not see a test word supplied in the immediately preceding side-chat message
 **Symptom:** Successive turns in one side chat started new Claude sessions, lost the working directory and permission instructions, and received only the newest user message.

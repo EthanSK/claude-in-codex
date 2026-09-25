@@ -92,6 +92,10 @@ Claude uses Claude Code's own tools (shell, file edits, subagents, …), plus th
 
 If Codex's bundled **Computer Use** plugin is enabled in your user config, the bridge finds its installed MCP configuration and gives Claude direct access to the same app-backed desktop and browser service. The service starts a fresh MCP connection for each Claude turn; Claude can inspect existing browser windows again on the next turn. Claude's permission mode still controls tool use. Other Codex-only plugins and task tools are not automatically shared. To give Claude a separate MCP server, add it to Claude Code too (`claude mcp add …`).
 
+**Full permissions are not full Codex tool access.** Permission bypass authorizes Claude Code's available tools; it does not supply Codex's pin, rename, task messaging, or other harness tools. A September 2026 integration probe could enumerate the bundled app-tools server and read tasks from a standalone client, but real Opus turns failed to connect; the desktop log reported rejected native-pipe peers. That prototype was removed, not released. Do not disable the app's peer authentication to work around this. A reliable integration through Codex's supported tool executor remains unimplemented.
+
+Computer Use also needs per-surface verification. A real Opus inventory call successfully reached the desktop and connected Chrome browser, but an in-app browser creation attempt returned `Browser is not available: iab`, while that browser was available through Codex's own tool in the same task. Desktop/browser inventory is not proof that clicking, screenshots, or every browser backend works. This in-app browser gap remains unresolved; no general “full harness access” claim is made.
+
 ### Switching models mid-chat
 
 Switch freely. Switching doesn't make Codex compact the chat.
