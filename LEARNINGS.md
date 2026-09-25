@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-25T11:51:00Z
+**Trigger:** Claude side chats denied Bash because approval was required; user requested full bridge permissions
+**Symptom:** Real turns logged `mode=acceptEdits`; Claude reported that a tool needed approval but the session could not ask.
+**Root cause:** `-p` is non-interactive, not permission bypass. The default `acceptEdits` mode still denies some tools with `--permission-prompts none`. The existing runner already passes `--dangerously-skip-permissions` when the selected mode is `bypassPermissions`.
+**Fix:** Document the existing opt-in configuration covering all sandbox mappings and `defaultPermissionMode`; apply it to the user's local bridge without changing other installations' defaults. Explicit Plan mode remains plan-only. Add prompt-free request-shape debug logs for the separate side-chat continuity investigation.
+**Guard:** Regression test covers absent sandbox metadata, every mapped mode, new/resumed turns, and Plan mode. Real Claude Code 2.1.281 bridge calls performed Write/Edit/Bash outside the cwd on a new and resumed session without a terminal prompt; an installed-service call also wrote and read the test file successfully after restart.
+---
+
+---
 **Date:** 2026-09-24T16:17:00Z
 **Trigger:** Other running Codex tasks repeatedly logged WebSocket startup errors
 **Symptom:** Codex's `agent-bridge-codex-channel` tried to prewarm GPT WebSockets without a model hint and received HTTP 426 every roughly 30 seconds. The bridge process stayed up, but the retries produced persistent errors and could delay connection setup.

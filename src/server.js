@@ -198,6 +198,8 @@ export function createBridge(config = loadConfig(), state = new State()) {
 
   async function handleClaudeResponses(req, res, body, modelCfg) {
     const parsed = parseCodexRequest(body, (sid, turnId) => state.isLatestTurn(sid, turnId));
+    // Log request structure, never prompt text or credentials, when tracing missing side-chat context.
+    log.debug(`Claude request shape ${JSON.stringify({ previousResponseId: body.previous_response_id || null, keys: Object.keys(body), input: Array.isArray(body.input) ? body.input.map((item) => ({ type: item.type, role: item.role, contentType: typeof item.content, marker: typeof item.encrypted_content === 'string' && item.encrypted_content.startsWith('ccb:v1:') })) : typeof body.input, sandboxMode: parsed.sandboxMode, hasCwd: Boolean(parsed.cwd), hasResume: Boolean(parsed.resume) })}`);
     // Side chats / forked threads start from the parent's history: give them their own
     // fork of the parent's Claude session instead of taking over the parent's session.
     const threadId = String(req.headers['thread-id'] || req.headers['session-id'] || body.prompt_cache_key || '') || null;

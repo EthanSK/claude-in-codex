@@ -145,6 +145,7 @@ For long chats, stick mainly to one model and switch for second opinions.
 - `models`: what appears in the picker. `claudeModel` is anything `claude --model` accepts (an alias or a full model name). Put the version in `displayName` (e.g. "Sonnet 5") so the picker shows exactly which model you get.
 - `hiddenModels`: optional upstream model slugs to hide from the picker. They remain in the catalog so existing chats can still use them. The example hides the three GPT-5.6 entries; the default is an empty list.
 - `permissionModes`: maps Codex's sandbox mode to a Claude Code permission mode.
+- `defaultPermissionMode`: the Claude permission mode when Codex omits sandbox information or sends an unrecognized mode. Defaults to `acceptEdits`, which can still deny commands needing approval in a non-interactive turn.
 - `fallbackModel`: the GPT model that answers housekeeping requests.
 - `codexComputerUseMcpConfig`: found automatically when Codex's bundled Computer Use plugin is explicitly enabled. Set it to `null` to disable sharing or to a `.mcp.json` path to override discovery.
 
@@ -155,6 +156,25 @@ launchctl kickstart -k gui/$(id -u)/com.codex-claude-bridge
 ```
 
 Code changes in `src/` are picked up automatically once every request and WebSocket connection closes. A long-lived GPT WebSocket can delay that restart; check the service's PID or a fresh `listening on` log line before claiming the new code is live. If a restart is needed, wait for active turns to finish before using the command above.
+
+### Full permissions for Claude turns
+
+If you want every ordinary Claude turn to run with permission bypass, merge these keys into your local `~/.codex-claude-bridge/config.json`, preserving its other settings, then restart the bridge:
+
+```json
+{
+  "defaultPermissionMode": "bypassPermissions",
+  "permissionModes": {
+    "danger-full-access": "bypassPermissions",
+    "workspace-write": "bypassPermissions",
+    "read-only": "bypassPermissions"
+  }
+}
+```
+
+This is an explicit local opt-in: it overrides Codex's read-only and workspace permission labels for Claude. Explicit Plan mode still uses Claude's plan mode. Other installations keep the original permission mapping unless their owner chooses this configuration.
+
+The bridge passes `--dangerously-skip-permissions` on both new and resumed turns. `-p` selects non-interactive print mode; it does not grant tool permissions by itself. With Claude Code 2.1.281, real bridge tests completed Write, Edit, and Bash operations outside the working directory without an interactive confirmation, including on a resumed session. The flag does not grant macOS privacy permissions or administrator access, and Claude's managed policies still apply. See the [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference).
 
 ## Troubleshooting
 

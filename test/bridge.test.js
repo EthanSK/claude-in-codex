@@ -256,6 +256,36 @@ test('Claude turn streams text, reasoning, web search and a marker; second turn 
 
 });
 
+test('an explicit full-permission configuration applies to missing modes and resumed turns, while plan mode remains plan', async () => {
+  const originalModes = bridge.config.permissionModes;
+  const originalDefault = bridge.config.defaultPermissionMode;
+  bridge.config.permissionModes = Object.fromEntries(Object.keys(originalModes).map((mode) => [mode, 'bypassPermissions']));
+  bridge.config.defaultPermissionMode = 'bypassPermissions';
+  try {
+    for (const mode of [null, 'workspace-write', 'read-only', 'danger-full-access']) {
+      const modeInput = mode ? [{ ...perms, content: [{ type: 'input_text', text: `\`sandbox_mode\` is \`${mode}\`` }] }] : [];
+      const before = readClaudeLog().length;
+      const input = [...modeInput, envContext(workdir), userMsg('permission check')];
+      const first = await request('/backend-api/codex/responses', { headers: { 'content-type': 'application/json' }, body: responsesBody('claude-opus-5-5', input) });
+      const output = parseSse(first.data).filter((e) => e.type === 'response.output_item.done').map((e) => e.item);
+      assert.ok(readClaudeLog().at(-1).args.includes('--dangerously-skip-permissions'), `new turn: ${mode}`);
+      await request('/backend-api/codex/responses', { headers: { 'content-type': 'application/json' }, body: responsesBody('claude-opus-5-5', [...input, ...output, userMsg('continue')]) });
+      const args = readClaudeLog().at(-1).args;
+      assert.ok(args.includes('--dangerously-skip-permissions'), `resumed turn: ${mode}`);
+      assert.ok(args.includes('--resume'));
+      assert.equal(readClaudeLog().length, before + 2);
+    }
+    const plan = { type: 'message', role: 'developer', content: [{ type: 'input_text', text: '<collaboration_mode># Plan Mode</collaboration_mode>' }] };
+    await request('/backend-api/codex/responses', { headers: { 'content-type': 'application/json' }, body: responsesBody('claude-opus-5-5', [plan, envContext(workdir), userMsg('plan only')]) });
+    const args = readClaudeLog().at(-1).args;
+    assert.equal(args[args.indexOf('--permission-mode') + 1], 'plan');
+    assert.ok(!args.includes('--dangerously-skip-permissions'));
+  } finally {
+    bridge.config.permissionModes = originalModes;
+    bridge.config.defaultPermissionMode = originalDefault;
+  }
+});
+
 test('computer-use config follows Codex plugin enablement', () => {
   const codexRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-codex-'));
   const pluginDir = path.join(codexRoot, 'plugins', 'cache', 'openai-bundled', 'unified-computer-use', '26.917.62051');
