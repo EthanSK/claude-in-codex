@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-25T20:40:00Z
+**Trigger:** User: a new side chat just shows "Thinking 0s" and never answers
+**Symptom:** An Opus side chat opened from a task whose Opus turn was running a long typecheck stayed at "Thinking 0s" for 2.5 minutes until stopped. Codex logs showed the request sent at 21:22:51 local time; the bridge log showed no `claude turn` line for it.
+**Root cause:** Turns are serialized per Claude session. A side chat forks its parent's session (`--resume <parent> --fork-session`), and the lock key was the parent's session ID, so the fork queued behind the parent's running turn. The `claude turn` log line is written inside the lock, so the wait was silent.
+**Fix:** `src/claudeRunner.js` gives a fork its own lock key, and logs when a turn waits for a busy session. A real Claude Code fork taken while the parent ran a 40-second foreground command answered in 9 seconds, and the parent then finished normally.
+**Guard:** Test "a new side chat does not wait for its parent's running Claude turn" (fails on the old lock key).
+---
+
+---
 **Date:** 2026-09-25T20:10:00Z
 **Trigger:** User asked for bridged Claude's questions to use Codex's question UI, because Claude Code's question tool has a different format
 **Symptom:** Claude was told to ask only in plain text. With the Codex tool handoff, an answer arriving during a tool run would also have been dropped, and one starting a new turn reached Claude only as background context with a "(continue)" prompt.

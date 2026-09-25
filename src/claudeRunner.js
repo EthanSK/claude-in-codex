@@ -128,7 +128,11 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     // keep the unresolved path; existsSync passed so this is a permissions edge case
   }
 
-  const lockKey = parsed.resume?.sid || rid('new_');
+  // A side-chat fork only reads the parent's session and writes a new one, so it must not queue behind the parent's running turn.
+  // Bug fixed 2026-09-25: a new Opus side chat sat at "Thinking 0s" until its parent's long typecheck turn finished.
+  // A real Claude Code fork taken while the parent ran a 40-second foreground command worked, and the parent then finished normally.
+  const lockKey = parsed.resume && !parsed.fork ? parsed.resume.sid : rid(parsed.fork ? 'fork_' : 'new_');
+  if (sessionLocks.has(lockKey)) log.info(`claude session ${lockKey} is busy; this turn waits for the running one`); // The "claude turn" line only appears once the wait ends.
   await withSessionLock(lockKey, async () => {
     const args = [
       '-p',

@@ -836,6 +836,35 @@ test('side chat (different thread) forks the parent Claude session; parent keeps
   assert.equal(calls[2].args[calls[2].args.indexOf('--resume') + 1], parentSid);
 });
 
+test('a new side chat does not wait for its parent\'s running Claude turn', async () => {
+  try {
+    fs.rmSync(claudeLog, { force: true });
+    const h = (thread) => ({ 'content-type': 'application/json', 'thread-id': thread });
+    const input1 = [perms, envContext(workdir), userMsg('first parent task')];
+    const first = await request('/backend-api/codex/responses', { headers: h('busy-main'), body: responsesBody('claude-opus-5-5', input1) });
+    const input2 = [...input1, ...doneItems(first.data), userMsg('long parent task')];
+    // The parent's next turn resumes its session and stays busy waiting for a Codex tool result, like a turn in the middle of a long command.
+    process.env.FAKE_CLAUDE_SCENARIO = 'codex-tools';
+    const parent = await request('/backend-api/codex/responses', { headers: h('busy-main'), body: responsesBody('claude-opus-5-5', input2, { tools: codexTools }) });
+    const parentItems = doneItems(parent.data);
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+
+    const side = request('/backend-api/codex/responses', { headers: h('busy-side'), body: responsesBody('claude-opus-5-5', [...input2, ...parentItems, userMsg('quick side question')]) });
+    const sideResult = await Promise.race([side, new Promise((resolve) => setTimeout(() => resolve(null), 3000))]);
+
+    // Finish the parent so its process exits (had the side chat been queued behind it, this would release it too).
+    const call = parentItems.find((item) => item.type === 'function_call');
+    const output = { type: 'function_call_output', call_id: call.call_id, output: 'done' };
+    const finished = await request('/backend-api/codex/responses', { headers: h('busy-main'), body: responsesBody('claude-opus-5-5', [...input2, ...parentItems, output], { tools: codexTools }) });
+    await side;
+    assert.equal(parseSse(finished.data).at(-1).response.end_turn, true);
+    assert.ok(sideResult, 'the side chat answered while the parent turn was still running');
+    assert.ok(readClaudeLog().some((call) => call.args.includes('--fork-session')));
+  } finally {
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+  }
+});
+
 test('Codex skills catalog is passed to Claude', async () => {
   fs.rmSync(claudeLog, { force: true });
   const dev = {
