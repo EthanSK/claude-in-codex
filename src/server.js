@@ -13,6 +13,7 @@ import { parseCodexRequest, buildClaudeUserMessage, sanitizeInputForOpenAI, make
 import { ResponsesStream, usageObject, rid } from './responsesStream.js';
 import { runClaudeTurn, compactSession, claudeCapabilities } from './claudeRunner.js';
 import { mergeCatalog, fallbackGptModel } from './catalog.js';
+import { findCodexResults, cancelWaitingCodexTurns } from './codexTools.js';
 
 const HOP_BY_HOP = new Set([
   'host',
@@ -226,6 +227,14 @@ export function createBridge(config = loadConfig(), state = new State()) {
     const stream = new ResponsesStream(res, { model: body.model });
     stream.begin();
 
+    // Codex ran tools a waiting Claude turn asked for: that same Claude process continues in this response.
+    const results = findCodexResults(body.input);
+    if (results) {
+      results.turn.resume(stream, results);
+      return;
+    }
+    await cancelWaitingCodexTurns(threadId);
+
     if (parsed.hasCompactionTrigger) {
       // Codex wants to compact a Claude thread: compact the Claude session instead.
       const sid = parsed.marker?.sid;
@@ -256,6 +265,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
       userMessage,
       log,
       req,
+      codexTools: body.tools,
     });
   }
 

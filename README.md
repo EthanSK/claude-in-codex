@@ -5,7 +5,7 @@
 ```
 Codex app ──► 127.0.0.1:18787 ──┬─ GPT model    → chatgpt.com over WebSocket or HTTP (your ChatGPT login)
                                 └─ Claude model → `claude -p` in the chat's project folder (your Claude login)
-                                                   └─ Codex Computer Use MCP, if enabled
+                                                   └─ Codex's own tools, run by Codex (see below)
 ```
 
 **How it works, in short:**
@@ -70,7 +70,7 @@ On macOS, `RunAtLoad` and `KeepAlive` in `~/Library/LaunchAgents/com.codex-claud
 | AGENTS.md, including your global one | appended to Claude's system prompt |
 | Your Codex skills | listed for Claude, which reads a SKILL.md when a task matches |
 | Codex memory block | included in Claude's system prompt when Codex sends it |
-| Codex Computer Use plugin | its installed MCP server is available to Claude for desktop and browser tasks when enabled |
+| Codex's tools (`exec`, Computer Use, sub-agents, questions, …) | offered to Claude as `mcp__codex__*`; Codex runs each call itself and returns the result to the same Claude turn |
 | Each chat | its own Claude session (`--resume`) |
 | Forked chats that reach the bridge | their own fork of the parent's session (`--fork-session`) |
 | Compact (auto or `/compact`) | Claude Code's `/compact` |
@@ -90,11 +90,27 @@ Codex housekeeping requests made while a Claude model is selected, such as threa
 
 Claude uses Claude Code's own tools (shell, file edits, subagents, …), plus the CLAUDE.md, memory, skills and MCP servers from your Claude Code setup. From Codex it gets your AGENTS.md, your Codex skills list and memory block, the chat's folder, the permission mode and the chat so far. That's why your AGENTS.md rules and Codex skills still apply. Claude Code records its system prompt when a session starts, so a later change to Codex memory may need a new Claude session or compaction to take effect.
 
-If Codex's bundled **Computer Use** plugin is enabled in your user config, the bridge finds its installed MCP configuration and gives Claude direct access to the same app-backed desktop and browser service. The service starts a fresh MCP connection for each Claude turn; Claude can inspect existing browser windows again on the next turn. Claude's permission mode still controls tool use. Other Codex-only plugins and task tools are not automatically shared. To give Claude a separate MCP server, add it to Claude Code too (`claude mcp add …`).
+### Codex's own tools, run by Codex
 
-**Full permissions are not full Codex tool access.** Permission bypass authorizes Claude Code's available tools; it does not supply Codex's pin, rename, task messaging, or other harness tools. A September 2026 integration probe could enumerate the bundled app-tools server and read tasks from a standalone client, but real Opus turns failed to connect; the desktop log reported rejected native-pipe peers. That prototype was removed, not released. Do not disable the app's peer authentication to work around this. A reliable integration through Codex's supported tool executor remains unimplemented.
+Each Codex request lists the tools Codex offers its own models. The bridge gives those tools to Claude as a small per-turn MCP server, named `codex`, so Claude sees names such as `mcp__codex__exec`, `mcp__codex__cua_repl__js` and `mcp__codex__request_user_input`. Claude doesn't connect to those tools directly. When Claude calls one:
 
-Computer Use also needs per-surface verification. A real Opus inventory call successfully reached the desktop and connected Chrome browser, but an in-app browser creation attempt returned `Browser is not available: iab`, while that browser was available through Codex's own tool in the same task. Desktop/browser inventory is not proof that clicking, screenshots, or every browser backend works. This in-app browser gap remains unresolved; no general “full harness access” claim is made.
+1. The bridge ends the current Codex response with an ordinary tool call, as a GPT model would.
+2. Codex runs the tool with its own executor. That covers its approvals, tool cards, task and app tools inside `exec`, and turn metadata for Computer Use.
+3. Codex sends the result in its next request. The bridge passes it to the Claude process that is still waiting, and that process carries on in the new response.
+
+Claude keeps its built-in tools and is told to use them for ordinary file and shell work. The Codex tools are for things only Codex can do. Hosted tools such as Codex's web search are left out because Claude Code has its own. When Codex offers Computer Use this way, the bridge stops starting its direct Computer Use connection. Codex's own executor supplies the right task context for it, including the in-app browser. The direct connection is now only a fallback for requests that don't include those tools.
+
+Other details:
+
+- Codex applies its own approval policy to these calls, so they are pre-approved in Claude (`--allowedTools mcp__codex`). Plan mode is the exception: there, Claude's read-only rules still apply.
+- Codex's `exec` tool lists every nested tool in its description, about 17 KB. For bridged turns the bridge raises Claude Code's 2,048-character MCP description limit (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`) to the longest Codex description. That higher limit also applies to your other MCP servers in those turns.
+- One MCP call can wait up to 24 hours (`MCP_TOOL_TIMEOUT`), because some tools wait on you, such as a question.
+- A message you send while a tool runs is added to that tool's result. So is one sent after stopping the turn, if Codex returned the results.
+- If a new message arrives on the task without those results, the bridge stops the waiting Claude process. It then resumes the session normally, and the unanswered call and anything Codex recorded appear as context.
+
+**Verified so far (September 2026, Claude Code 2.1.281, Codex CLI 0.155):** in real Opus turns through the Codex CLI, `exec` ran a shell command that Codex itself executed and displayed. Computer Use read desktop and Chrome state. Two Codex calls followed by Claude's own Bash all finished in one Claude process. The desktop app's task tools (pin, rename, messaging) and the in-app browser weren't tested through this path at the time of writing.
+
+**History:** a September 2026 prototype that connected Claude straight to the desktop app-tools server was rejected by the app's native-pipe peer check, and was removed. Don't disable that check to work around this.
 
 ### Switching models mid-chat
 
@@ -153,7 +169,7 @@ For long chats, stick mainly to one model and switch for second opinions.
 - `permissionModes`: maps Codex's sandbox mode to a Claude Code permission mode.
 - `defaultPermissionMode`: the Claude permission mode when Codex omits sandbox information or sends an unrecognized mode. Defaults to `acceptEdits`, which can still deny commands needing approval in a non-interactive turn.
 - `fallbackModel`: the GPT model that answers housekeeping requests.
-- `codexComputerUseMcpConfig`: found automatically when Codex's bundled Computer Use plugin is explicitly enabled. Set it to `null` to disable sharing or to a `.mcp.json` path to override discovery.
+- `codexComputerUseMcpConfig`: found automatically when Codex's bundled Computer Use plugin is explicitly enabled. It's used only when a Codex request doesn't already offer Computer Use as a Codex-run tool. Set it to `null` to disable that fallback, or to a `.mcp.json` path to override discovery.
 
 After changing the config, restart the service, then restart Codex so it reloads the model list:
 
@@ -199,7 +215,7 @@ The bridge passes `--dangerously-skip-permissions` on both new and resumed turns
 - Claude's tool calls don't go through Codex's approval prompts. Permissions come from the mapping above.
 - Codex 0.155 usually tells the bridge which model is connecting in the WebSocket handshake, but some startup prewarm clients omit the hint. The bridge accepts both forms and checks each message: Claude turns run locally, while GPT remains on WebSocket. A connection without a GPT hint only opens an upstream GPT socket when a GPT message arrives, using that message's model as its routing hint. The bridge remains a local hop, and its latency versus a direct GPT connection has not been measured.
 - Forked Claude sessions that reach the bridge get their own Claude session.
-- The Computer Use MCP server runs through Claude Code's tool permissions, not Codex's own tool approval prompts. Its browser and desktop actions are available, but this does not give Claude every Codex app tool.
+- The fallback direct Computer Use connection goes through Claude Code's permissions, not Codex's approval prompts. Codex-run tools use Codex's own approvals.
 - This depends on Codex's internal request format, which can change with Codex updates. The tests pin the shapes the bridge relies on.
 - Model requests on the configured local Codex route go through the bridge, GPT included. If the service isn't running, GPT on that route stops working too. `./scripts/uninstall.sh` restores Codex's direct OpenAI route.
 - Codex's desktop-app instructions aren't passed to Claude. Claude Code's own memory still applies alongside the Codex memory block when one is supplied.

@@ -2,6 +2,8 @@
 // Stand-in for the Claude Code CLI: records its argv/stdin and emits stream-json.
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import readline from 'node:readline';
+import { spawn } from 'node:child_process';
 
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
@@ -59,6 +61,13 @@ process.stdin.on('end', () => {
     out({ type: 'assistant', session_id: sid, parent_tool_use_id: null, message: { id: msg1, content: [{ type: 'tool_use', id: 'tu9', name: 'ExitPlanMode', input: { plan: '1. Do X\n2. Do Y' } }] } });
     out({ type: 'user', session_id: sid, parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: 'tu9', is_error: true, content: 'denied' }] } });
   }
+  if (scenario === 'codex-tools') {
+    callCodexTool(sid, msg1, out).catch((error) => {
+      console.error(error);
+      process.exit(1);
+    });
+    return;
+  }
   if (scenario === 'error') {
     out({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'Usage limit reached', session_id: sid });
     return;
@@ -73,3 +82,35 @@ process.stdin.on('end', () => {
     modelUsage: { 'claude-opus-5-5': { contextWindow: 1000000 } },
   });
 });
+
+// Acts as Claude Code's MCP client: lists the bridge's Codex tools, calls one and waits for Codex's result.
+async function callCodexTool(sid, messageId, out) {
+  const server = JSON.parse(args[args.indexOf('--mcp-config') + 1]).mcpServers.codex;
+  const mcp = spawn(server.command, server.args, { env: { ...process.env, ...server.env }, stdio: ['pipe', 'pipe', 'inherit'] });
+  const replies = new Map();
+  readline.createInterface({ input: mcp.stdout }).on('line', (line) => {
+    const message = JSON.parse(line);
+    replies.get(message.id)?.(message);
+  });
+  let nextId = 0;
+  const rpc = (method, params) => new Promise((resolve) => {
+    const id = ++nextId;
+    replies.set(id, resolve);
+    mcp.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+  });
+  await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-claude', version: '1' } });
+  mcp.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
+  const { result } = await rpc('tools/list', {});
+  if (log) fs.appendFileSync(`${log}.codex-tools`, `${JSON.stringify({ tools: result.tools, descriptionLimit: process.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH, toolTimeout: process.env.MCP_TOOL_TIMEOUT })}\n`);
+  const name = process.env.FAKE_CODEX_TOOL || 'codex_app__list_threads';
+  const input = name === 'exec' ? { input: 'text(1)' } : { limit: 5 };
+  out({ type: 'assistant', session_id: sid, parent_tool_use_id: null, message: { id: messageId, content: [{ type: 'text', text: "I'll check the file." }, { type: 'tool_use', id: 'tu_codex', name: `mcp__codex__${name}`, input }] } });
+  const called = await rpc('tools/call', { name, arguments: input, _meta: { 'claudecode/toolUseId': 'tu_codex' } });
+  out({ type: 'user', session_id: sid, parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: 'tu_codex', content: called.result.content }] } });
+  const text = `Codex said: ${called.result.content.map((part) => part.text ?? `[${part.type} ${part.mimeType}]`).join(' | ')}`;
+  out({ type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: { type: 'message_start', message: { id: 'msg_codex_2' } } });
+  out({ type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } } });
+  out({ type: 'assistant', session_id: sid, parent_tool_use_id: null, message: { id: 'msg_codex_2', content: [{ type: 'text', text }] } });
+  out({ type: 'result', subtype: 'success', is_error: false, result: text, session_id: sid, usage: { output_tokens: 7 } });
+  mcp.kill();
+}

@@ -6,12 +6,27 @@ import { fileURLToPath } from 'node:url';
 import { rid, usageObject } from './responsesStream.js';
 import { makeMarker } from './codexInput.js';
 import { describeToolUse, describeToolError } from './toolDisplay.js';
+import {
+  CODEX_TOOLS_SERVER,
+  CodexToolServer,
+  codexToolCatalog,
+  codexOutputToMcp,
+  forgetCodexCalls,
+  isCodexToolName,
+  waitForCodexResults,
+} from './codexTools.js';
 
 const BRIDGE_NOTE = [
   'You are running inside the Codex desktop app through a local bridge; the user picked you in Codex\'s model picker.',
   'The user sees your text replies and a one-line summary of each tool you use; they do not see raw tool output.',
   'Codex renders Markdown. Refer to files by path relative to the working directory.',
   'You cannot show interactive permission prompts or ask multiple-choice questions here: if you need a decision, ask in plain text and end your turn.',
+].join('\n');
+
+const CODEX_TOOLS_NOTE = [
+  `Tools named \`mcp__${CODEX_TOOLS_SERVER}__*\` are the Codex app's own tools, the same ones Codex gives GPT. Codex runs them itself, shows them in its UI and applies its own approvals.`,
+  'Use them for abilities only Codex has, such as the task and app tools inside `exec` (filter `ALL_TOOLS` there to find them), Computer Use and the in-app browser, Codex sub-agents, and asking the user questions when that tool is offered.',
+  'Prefer your built-in tools for ordinary file and shell work.',
 ].join('\n');
 
 const EFFORT = {
@@ -70,7 +85,7 @@ export function permissionArgs(mode) {
  * Runs one Claude Code turn and streams it into Codex.
  * @returns {Promise<void>}
  */
-export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, effort, userMessage, log, req }) {
+export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, effort, userMessage, log, req, codexTools }) {
   const caps = await claudeCapabilities(config.claudePath);
   if (!caps.ok) {
     stream.textDelta(
@@ -118,27 +133,50 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     const skills = parsed.skills
       ? `The user's Codex skills are listed below. They are in addition to your own Claude Code skills. When a task matches one, read its SKILL.md with the Read tool and follow it, exactly as you would one of your own skills. When the user names a skill (e.g. $name), use it.\n\n${parsed.skills}`
       : '';
-    const system = [BRIDGE_NOTE, config.extraSystemPrompt, ...parsed.agentsMd, skills, parsed.codexMemory]
+    const catalog = codexToolCatalog(codexTools);
+    const system = [BRIDGE_NOTE, catalog.size ? CODEX_TOOLS_NOTE : '', config.extraSystemPrompt, ...parsed.agentsMd, skills, parsed.codexMemory]
       .filter(Boolean)
       .join('\n\n');
     args.push('--append-system-prompt', system);
-    if (config.codexComputerUseMcpConfig) {
-      const mcpConfig = {
-        mcpServers: {
-          cua_repl: {
-            command: process.execPath,
-            args: [fileURLToPath(new URL('./cuaMcpProxy.js', import.meta.url))],
-            env: {
-              CODEX_CUA_MCP_CONFIG_PATH: config.codexComputerUseMcpConfig,
-              CODEX_CUA_SESSION_ID: parsed.threadId || rid('ccb_session_'),
-              CODEX_CUA_TURN_ID: parsed.codexTurnId || rid('ccb_turn_'),
-              CODEX_CUA_MODEL: modelCfg.claudeModel,
-            },
-          },
+    const mcpConfig = { mcpServers: {} };
+    const env = { ...process.env, CODEX_CLAUDE_BRIDGE: '1' };
+    // Calls Claude makes to Codex's tools; each waits here until Codex returns its result.
+    const queuedCodexCalls = [];
+    let codexToolServer = null;
+    if (catalog.size) {
+      codexToolServer = new CodexToolServer(catalog, (call) => {
+        queuedCodexCalls.push(call);
+        scheduleCodexHandoff();
+      });
+      mcpConfig.mcpServers[CODEX_TOOLS_SERVER] = {
+        command: process.execPath,
+        args: [fileURLToPath(new URL('./codexToolsMcpProxy.js', import.meta.url))],
+        env: { CODEX_CLAUDE_BRIDGE_TOOLS_SOCKET: await codexToolServer.listen() },
+      };
+      // Codex runs its tools under its own approval policy, so Claude should not block them too. Plan mode keeps Claude's read-only rules.
+      if (permissionMode !== 'plan') args.push('--allowedTools', `mcp__${CODEX_TOOLS_SERVER}`);
+      // Codex's `exec` lists every nested tool in its description (about 17 KB); Claude Code otherwise cuts MCP descriptions at 2,048 characters.
+      const longestDescription = Math.max(...[...catalog.values()].map((entry) => entry.mcpTool.description.length));
+      env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH = String(Math.max(2048, longestDescription));
+      // A Codex tool can legitimately wait a long time, for example on the user's answer to a question.
+      env.MCP_TOOL_TIMEOUT = String(CODEX_TOOL_TIMEOUT_MS);
+    }
+    // Codex's own executor already provides Computer Use with the right turn metadata, including the in-app browser; the direct proxy is the fallback.
+    const codexRunsComputerUse = [...catalog.values()].some((entry) => entry.namespace === 'mcp__cua_repl');
+    if (config.codexComputerUseMcpConfig && !codexRunsComputerUse) {
+      mcpConfig.mcpServers.cua_repl = {
+        command: process.execPath,
+        args: [fileURLToPath(new URL('./cuaMcpProxy.js', import.meta.url))],
+        env: {
+          CODEX_CUA_MCP_CONFIG_PATH: config.codexComputerUseMcpConfig,
+          CODEX_CUA_SESSION_ID: parsed.threadId || rid('ccb_session_'),
+          CODEX_CUA_TURN_ID: parsed.codexTurnId || rid('ccb_turn_'),
+          CODEX_CUA_MODEL: modelCfg.claudeModel,
         },
       };
-      args.push('--mcp-config', JSON.stringify(mcpConfig));
     }
+    if (Object.keys(mcpConfig.mcpServers).length) args.push('--mcp-config', JSON.stringify(mcpConfig));
+    if (catalog.size) log.info(`codex tools for claude: ${[...catalog.keys()].join(', ')}`); // Tool names only; shows which Codex surfaces this turn could reach.
 
     log.info(
       `claude turn model=${modelCfg.claudeModel} mode=${permissionMode} effort=${effortLevel || '-'} cwd=${cwd} ${
@@ -148,24 +186,29 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
 
     const child = spawn(config.claudePath, args, {
       cwd,
-      env: { ...process.env, CODEX_CLAUDE_BRIDGE: '1' },
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    const exited = new Promise((resolve) => child.on('close', resolve));
 
     let finished = false;
-    const onClientGone = () => {
-      if (finished) return;
-      log.info('codex closed the stream; stopping claude');
+    const stopClaude = () => {
       child.kill('SIGINT');
       setTimeout(() => child.exitCode === null && child.kill('SIGTERM'), 4000).unref();
     };
+    const onClientGone = () => {
+      if (finished) return;
+      log.info('codex closed the stream; stopping claude');
+      stopClaude();
+    };
     // res 'close' fires on normal finish too; only act if we hadn't finished writing.
-    stream.res.on('close', () => {
-      if (!stream.res.writableFinished) onClientGone();
+    const watchClient = (res) => res.on('close', () => {
+      if (!res.writableFinished) onClientGone();
     });
+    watchClient(stream.res);
     void req;
 
-    const keepAlive = setInterval(() => stream.keepAlive(), config.keepAliveSeconds * 1000);
+    const keepAlive = setInterval(() => stream?.keepAlive(), config.keepAliveSeconds * 1000);
 
     child.stdin.on('error', () => {});
     child.stdin.end(`${JSON.stringify(userMessage)}\n`);
@@ -189,6 +232,20 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       model: modelCfg.claudeModel,
     };
 
+    // While Codex runs a tool there is no open response (`stream` is null); keep Claude's events for the next one.
+    const heldEvents = [];
+    const handle = (ev) => {
+      if (!stream) {
+        heldEvents.push(ev);
+        return;
+      }
+      try {
+        handleEvent(ev, ctx, stream);
+      } catch (err) {
+        log.error(`event handling failed: ${err.stack || err}`);
+      }
+    };
+
     const rl = readline.createInterface({ input: child.stdout });
     rl.on('line', (line) => {
       if (!line.trim()) return;
@@ -198,25 +255,86 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       } catch {
         return;
       }
-      try {
-        handleEvent(ev, ctx, stream);
-      } catch (err) {
-        log.error(`event handling failed: ${err.stack || err}`);
-      }
+      handle(ev);
     });
+
+    // Handing Claude's Codex tool calls to Codex: end this response with the calls and wait for Codex's next request.
+    const waiting = new Map(); // callId -> call handed to Codex
+    const turn = {
+      threadId: parsed.threadId,
+      // Codex sent the results: continue this same Claude process in Codex's new response.
+      resume(nextStream, { outputs, userText }) {
+        stream = nextStream;
+        watchClient(stream.res);
+        const calls = [...waiting.values()];
+        forgetCodexCalls(waiting.keys());
+        waiting.clear();
+        calls.forEach((call, index) => {
+          const content = outputs.has(call.callId)
+            ? codexOutputToMcp(outputs.get(call.callId))
+            : [{ type: 'text', text: 'Codex returned no result for this tool call.' }];
+          if (userText && index === calls.length - 1) content.push({ type: 'text', text: `The user sent this message while the tool was running:\n\n${userText}` });
+          call.reply(content);
+        });
+        for (const ev of heldEvents.splice(0)) handle(ev);
+        scheduleCodexHandoff();
+      },
+      // The user moved on without returning results (for example after stopping the turn), so this process would wait forever.
+      async cancel() {
+        log.info('codex did not return tool results; stopping the waiting claude turn');
+        stopClaude();
+        await exited;
+      },
+    };
+    let handoffTimer = null;
+    function scheduleCodexHandoff() {
+      if (!stream || handoffTimer || !queuedCodexCalls.length) return;
+      // A short pause lets Claude's stdout (text before the call) and any parallel calls arrive first.
+      handoffTimer = setTimeout(handOffCodexCalls, 100);
+    }
+    function handOffCodexCalls() {
+      handoffTimer = null;
+      if (!stream || !queuedCodexCalls.length) return;
+      // Wait (up to a second) until the stdout event naming each call is handled, so its preceding text lands in this response.
+      const unseen = queuedCodexCalls.some((call) => call.toolUseId && !ctx.tools.has(call.toolUseId));
+      if (unseen && Date.now() - queuedCodexCalls[0].queuedAt < 1000) {
+        scheduleCodexHandoff();
+        return;
+      }
+      const calls = queuedCodexCalls.splice(0);
+      finishWebSearches(ctx, stream);
+      stream.closeOpen('commentary');
+      // A marker lets a fresh Claude process resume this session if the bridge restarts before Codex replies.
+      if (ctx.sid) {
+        const turnId = rid('t');
+        stream.marker(makeMarker(ctx.sid, turnId));
+        state.recordTurn(ctx.sid, turnId, parsed.threadId);
+      }
+      for (const call of calls) {
+        stream.codexToolCall(call);
+        waiting.set(call.callId, call);
+      }
+      waitForCodexResults(calls, turn);
+      log.info(`handed ${calls.map((call) => call.entry.name).join(', ')} to codex`);
+      stream.complete(usageSoFar(ctx), { endTurn: false });
+      stream = null;
+    }
 
     const exitCode = await new Promise((resolve) => {
       child.on('error', (err) => {
         stderr += `\n${err.message}`;
         resolve(-1);
       });
-      child.on('close', (code) => resolve(code));
+      exited.then(resolve);
     });
     await new Promise((r) => setImmediate(r));
     finished = true;
     clearInterval(keepAlive);
+    clearTimeout(handoffTimer);
+    forgetCodexCalls(waiting.keys());
+    codexToolServer?.close();
 
-    if (stream.closed) return;
+    if (!stream || stream.closed) return;
 
     const r = ctx.result;
     if (ctx.plan) {
@@ -237,14 +355,30 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       state.recordTurn(ctx.sid, turnId, parsed.threadId);
     }
 
-    const u = ctx.lastUsage || {};
-    const contextTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-    const outputTokens = r?.usage?.output_tokens ?? u.output_tokens ?? 0;
     for (const mu of Object.values(r?.modelUsage || {})) {
       if (mu?.contextWindow) state.setContextWindow(modelCfg.slug, mu.contextWindow);
     }
-    stream.complete(usageObject({ input: contextTokens, cached: u.cache_read_input_tokens || 0, output: outputTokens }));
+    stream.complete(usageSoFar(ctx, r?.usage?.output_tokens));
   });
+}
+
+// Longest a Claude turn waits for Codex to run one tool before the MCP call times out.
+const CODEX_TOOL_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+
+function usageSoFar(ctx, outputTokens) {
+  const u = ctx.lastUsage || {};
+  const contextTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+  return usageObject({ input: contextTokens, cached: u.cache_read_input_tokens || 0, output: outputTokens ?? u.output_tokens ?? 0 });
+}
+
+// Web search cards belong to the response that opened them, so close them before that response ends.
+function finishWebSearches(ctx, stream) {
+  for (const entry of ctx.tools.values()) {
+    if (entry.web) {
+      stream.webSearchDone(entry.web);
+      entry.web = null;
+    }
+  }
 }
 
 function lastLines(s, n = 6) {
@@ -304,9 +438,10 @@ export function handleEvent(ev, ctx, stream) {
           stream.reasoning(block.thinking);
         } else if (block.type === 'tool_use' || block.type === 'server_tool_use') {
           if (ctx.tools.has(block.id)) continue;
-          const shown = describeToolUse(block, ctx.cwd);
           const entry = { name: block.name, description: block.input?.description };
           ctx.tools.set(block.id, entry);
+          if (isCodexToolName(block.name)) continue; // Codex shows its own card for the tool call item.
+          const shown = describeToolUse(block, ctx.cwd);
           if (!shown) continue;
           if (shown.kind === 'web') entry.web = stream.webSearchStart(shown.action);
           else if (shown.kind === 'plan') ctx.plan = shown.plan;
@@ -326,7 +461,7 @@ export function handleEvent(ev, ctx, stream) {
           stream.webSearchDone(entry.web);
           entry.web = null;
         }
-        if (block.is_error && entry.name !== 'ExitPlanMode') {
+        if (block.is_error && entry.name !== 'ExitPlanMode' && !isCodexToolName(entry.name)) {
           stream.reasoning(describeToolError(entry.name, block.content, entry.description));
         }
       }
@@ -336,12 +471,7 @@ export function handleEvent(ev, ctx, stream) {
     case 'result':
       ctx.result = ev;
       if (ev.session_id) ctx.sid = ev.session_id;
-      for (const entry of ctx.tools.values()) {
-        if (entry.web) {
-          stream.webSearchDone(entry.web);
-          entry.web = null;
-        }
-      }
+      finishWebSearches(ctx, stream);
       return;
 
     default:

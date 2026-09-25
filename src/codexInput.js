@@ -3,7 +3,9 @@
 // where the last bridged turn ended.
 
 export const MARKER_PREFIX = 'ccb:v1:';
-export const BRIDGE_ID_PREFIXES = ['msg_ccb_', 'rs_ccb_', 'ws_ccb_', 'cmp_ccb_'];
+export const BRIDGE_ID_PREFIXES = ['msg_ccb_', 'rs_ccb_', 'ws_ccb_', 'cmp_ccb_', 'fc_ccb_', 'ctc_ccb_'];
+// Bridge items that carry real conversation content (unlike markers and web search cards).
+const BRIDGE_CONTENT_TYPES = new Set(['message', 'function_call', 'custom_tool_call']);
 
 const MAX_CONTEXT_CHARS = 60000;
 const MAX_TOOL_OUTPUT_CHARS = 2000;
@@ -221,7 +223,7 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
 
   const contextLines = [];
   for (const it of newItems.slice(0, promptStart)) {
-    if (isBridgeItem(it) && it.type !== 'message') continue; // A fresh session still needs earlier Claude replies; only bridge control items are omitted.
+    if (isBridgeItem(it) && !BRIDGE_CONTENT_TYPES.has(it.type)) continue; // A fresh session still needs earlier Claude replies and Codex tool calls; only bridge control items are omitted.
     const line = renderContextItem(it);
     if (line) contextLines.push(line);
   }
@@ -299,7 +301,7 @@ export function sanitizeInputForOpenAI(input) {
       continue;
     }
     changed = true;
-    if (item.type === 'message') {
+    if (BRIDGE_CONTENT_TYPES.has(item.type)) { // Keep Claude's replies and Codex tool calls (their outputs refer to them); only the bridge-made id is dropped.
       const { id, ...rest } = item;
       void id;
       out.push(rest);

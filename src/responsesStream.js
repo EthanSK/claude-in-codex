@@ -137,6 +137,18 @@ export class ResponsesStream {
     this.output.push(item);
   }
 
+  // A call for Codex to run with its own tool executor (see src/codexTools.js).
+  codexToolCall({ callId, entry, args }) {
+    this.closeOpen('commentary');
+    const item = entry.custom
+      ? { id: rid('ctc_ccb_'), type: 'custom_tool_call', status: 'completed', call_id: callId, name: entry.name, input: String(args.input ?? '') }
+      : { id: rid('fc_ccb_'), type: 'function_call', call_id: callId, name: entry.name, ...(entry.namespace ? { namespace: entry.namespace } : {}), arguments: JSON.stringify(args) };
+    this.send('response.output_item.added', { output_index: this.outputIndex, item });
+    this.send('response.output_item.done', { output_index: this.outputIndex, item });
+    this.output.push(item);
+    this.outputIndex++;
+  }
+
   compaction(encryptedContent) {
     this.closeOpen('commentary');
     const item = { id: rid('cmp_ccb_'), type: 'compaction', encrypted_content: encryptedContent };
@@ -188,10 +200,11 @@ export class ResponsesStream {
     this.outputIndex++;
   }
 
-  complete(usage) {
+  // endTurn=false tells Codex to run this response's tool calls and send their results back.
+  complete(usage, { endTurn = true } = {}) {
     this.closeOpen('final_answer');
     this.send('response.completed', {
-      response: this.responseObject('completed', { usage, end_turn: true }),
+      response: this.responseObject('completed', { usage, end_turn: endTurn }),
     });
     this.end();
   }

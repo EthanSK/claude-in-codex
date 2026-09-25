@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-25T17:30:00Z
+**Trigger:** User asked for the bridge to stop relaying Codex tools through Claude-launched connections so bridged Claude gets Codex's task tools and in-app browser
+**Symptom:** Claude-launched MCP clients were rejected by the desktop app-tools pipe (code-signing peer check). The in-app browser was also unavailable to the direct Computer Use proxy.
+**Root cause:** The bridge ran every tool inside Claude Code. Only Codex's own executor holds the trusted pipe connection, the per-turn metadata and the in-app browser.
+**Fix:** `src/codexTools.js` turns the request's `tools` into a per-turn MCP server (`mcp__codex__*`). A call ends the current response with a real `function_call`/`custom_tool_call` item (`end_turn: false`) and holds the Claude process. The next Codex request carrying that `call_id`'s output resumes the same process (`findCodexResults` in `src/server.js`). A new message without the results cancels the waiting turn before resuming normally. `sanitizeInputForOpenAI` keeps these calls for GPT without bridge ids. A real Codex capture showed code mode: one freeform `exec` tool whose description (about 17 KB) lists nested tools, plus `wait`, `request_user_input`, `clock`, `collaboration`, `mcp__cua_repl` and hosted `web_search`.
+**Guard:** Four regression tests: HTTP and WebSocket continuation, cancellation and GPT sanitising. Real Opus turns through `codex exec --ephemeral` against an isolated bridge copy completed `exec` → Codex-run shell, Computer Use `getState`, and serial parallel calls plus native Bash in one process. Claude Code serialises the parallel MCP calls (each was handed off separately about 0.2 s apart). Claude Code caps MCP descriptions at 2,048 characters unless `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` is raised. Desktop-only tools (codex_app task tools, in-app browser) still need a live desktop check after the installed service reloads.
+---
+
+---
 **Date:** 2026-09-25T17:05:00Z
 **Trigger:** User requested Codex task tools (pinning, renaming and task messaging) and Computer Use for bridged Claude
 **Symptom:** Claude has permission bypass but lacks Codex app tools; Computer Use surfaces differ from Codex's own executor.

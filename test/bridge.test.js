@@ -859,3 +859,110 @@ test('a failed shell command shows its description and last output line, not jus
   assert.equal(describeToolError('Bash', 'Exit code 2'), '**Command failed** (exit 2)');
   assert.equal(describeToolError('Edit', '<tool_use_error>Found 2 matches</tool_use_error>'), '**Edit failed:** <tool_use_error>Found 2 matches</tool_use_error>');
 });
+
+const codexTools = [
+  { type: 'function', name: 'request_user_input', description: 'Ask the user.', parameters: { type: 'object', properties: { questions: { type: 'array' } } } },
+  { type: 'namespace', name: 'codex_app', description: 'Codex app tools.', tools: [{ type: 'function', name: 'list_threads', description: 'List tasks.', parameters: { type: 'object', properties: { limit: { type: 'number' } } } }] },
+  { type: 'namespace', name: 'mcp__cua_repl', description: 'UI automation.', tools: [{ type: 'function', name: 'js', description: 'x'.repeat(5000), parameters: { type: 'object', properties: { code: { type: 'string' } } } }] },
+  { type: 'custom', name: 'exec', description: 'Run JavaScript.', format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' } },
+  { type: 'web_search' },
+];
+const codexToolsLog = () => fs.readFileSync(`${claudeLog}.codex-tools`, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+const doneItems = (data) => parseSse(data).filter((e) => e.type === 'response.output_item.done').map((e) => e.item);
+
+test('Claude calls Codex tools that Codex runs, and the same Claude process continues with the result', async () => {
+  process.env.FAKE_CLAUDE_SCENARIO = 'codex-tools';
+  try {
+    fs.rmSync(claudeLog, { force: true });
+    fs.rmSync(`${claudeLog}.codex-tools`, { force: true });
+    const headers = { 'content-type': 'application/json', 'thread-id': 'tools-thread' };
+    const input1 = [perms, envContext(workdir), userMsg('list my tasks')];
+    const first = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', input1, { tools: codexTools }) });
+    const firstEvents = parseSse(first.data);
+    const firstItems = doneItems(first.data);
+    const commentary = firstItems.find((item) => item.type === 'message');
+    assert.equal(commentary.content[0].text, "I'll check the file.");
+    assert.equal(commentary.phase, 'commentary');
+    const call = firstItems.find((item) => item.type === 'function_call');
+    assert.deepEqual({ name: call.name, namespace: call.namespace, arguments: JSON.parse(call.arguments) }, { name: 'list_threads', namespace: 'codex_app', arguments: { limit: 5 } });
+    assert.match(call.id, /^fc_ccb_/);
+    assert.ok(firstItems.some((item) => item.encrypted_content?.startsWith('ccb:v1:')), 'a marker lets a restarted bridge resume the session');
+    assert.equal(firstEvents.at(-1).response.end_turn, false);
+    assert.ok(!firstItems.some((item) => item.type === 'reasoning' && item.summary[0]?.text?.includes('mcp__codex')), 'Codex draws its own tool card');
+
+    const claudeCall = readClaudeLog()[0];
+    const mcpConfig = JSON.parse(claudeCall.args[claudeCall.args.indexOf('--mcp-config') + 1]);
+    assert.ok(mcpConfig.mcpServers.codex);
+    assert.equal(mcpConfig.mcpServers.cua_repl, undefined, 'Codex runs Computer Use itself when it offers it');
+    assert.equal(claudeCall.args[claudeCall.args.indexOf('--allowedTools') + 1], 'mcp__codex');
+    assert.match(claudeCall.args[claudeCall.args.indexOf('--append-system-prompt') + 1], /Codex app's own tools/);
+    const listed = codexToolsLog()[0];
+    assert.deepEqual(listed.tools.map((tool) => tool.name), ['request_user_input', 'codex_app__list_threads', 'cua_repl__js', 'exec']);
+    assert.deepEqual(listed.tools.find((tool) => tool.name === 'exec').inputSchema.required, ['input']);
+    assert.match(listed.tools.find((tool) => tool.name === 'exec').description, /start: \/\.\+\//);
+    assert.ok(Number(listed.descriptionLimit) >= 5000, 'long Codex tool descriptions are not cut short');
+    assert.ok(Number(listed.toolTimeout) >= 60 * 60 * 1000);
+
+    const output = { type: 'function_call_output', call_id: call.call_id, output: [{ type: 'input_text', text: '3 tasks' }, { type: 'input_image', image_url: 'data:image/png;base64,iVBOR' }] };
+    const second = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', [...input1, ...firstItems, output, userMsg('also pin it')], { tools: codexTools }) });
+    const secondEvents = parseSse(second.data);
+    const final = doneItems(second.data).find((item) => item.type === 'message');
+    assert.equal(final.content[0].text, 'Codex said: 3 tasks | [image image/png] | The user sent this message while the tool was running:\n\nalso pin it');
+    assert.equal(final.phase, 'final_answer');
+    assert.equal(secondEvents.at(-1).response.end_turn, true);
+    assert.equal(readClaudeLog().length, 1, 'no second Claude process');
+  } finally {
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+  }
+});
+
+test('WebSocket follow-ups carrying only Codex tool results continue the waiting Claude turn', async () => {
+  process.env.FAKE_CLAUDE_SCENARIO = 'codex-tools';
+  process.env.FAKE_CODEX_TOOL = 'exec';
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`);
+  await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+  try {
+    const body = (input, extra = {}) => ({ ...JSON.parse(responsesBody('claude-opus-5-5', input, { tools: codexTools })), ...extra });
+    const first = await webSocketTurn(socket, body([perms, envContext(workdir), userMsg('run some js')], { client_metadata: { thread_id: 'ws-tools' } }));
+    const call = first.response.output.find((item) => item.type === 'custom_tool_call');
+    assert.deepEqual({ name: call.name, input: call.input }, { name: 'exec', input: 'text(1)' });
+    assert.equal(first.response.end_turn, false);
+    const second = await webSocketTurn(socket, body([{ type: 'custom_tool_call_output', call_id: call.call_id, output: [{ type: 'input_text', text: '1' }] }], { previous_response_id: first.response.id, client_metadata: { thread_id: 'ws-tools' } }));
+    assert.equal(second.response.output.find((item) => item.type === 'message').content[0].text, 'Codex said: 1');
+    assert.equal(second.response.end_turn, true);
+  } finally {
+    socket.close();
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+    delete process.env.FAKE_CODEX_TOOL;
+  }
+});
+
+test('a new message without the tool results stops the waiting Claude turn before resuming its session', async () => {
+  process.env.FAKE_CLAUDE_SCENARIO = 'codex-tools';
+  try {
+    fs.rmSync(claudeLog, { force: true });
+    const headers = { 'content-type': 'application/json', 'thread-id': 'abandoned-thread' };
+    const input1 = [perms, envContext(workdir), userMsg('list my tasks')];
+    const first = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', input1, { tools: codexTools }) });
+    const firstItems = doneItems(first.data);
+    const sid = firstItems.find((item) => item.encrypted_content?.startsWith('ccb:v1:')).encrypted_content.split(':')[2];
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+    await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', [...input1, ...firstItems, userMsg('never mind')], { tools: codexTools }) });
+    const calls = readClaudeLog();
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].args[calls[1].args.indexOf('--resume') + 1], sid);
+    assert.match(JSON.parse(calls[1].stdin).message.content[0].text, /\[list_threads call\][\s\S]*never mind/);
+  } finally {
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+  }
+});
+
+test('GPT requests keep bridge-made Codex tool calls, without their bridge ids', async () => {
+  const { sanitizeInputForOpenAI } = await import('../src/codexInput.js');
+  const call = { type: 'function_call', id: 'fc_ccb_1', call_id: 'call_ccb_1', name: 'list_threads', namespace: 'codex_app', arguments: '{}' };
+  const custom = { type: 'custom_tool_call', id: 'ctc_ccb_1', call_id: 'call_ccb_2', name: 'exec', input: 'text(1)' };
+  const { input, changed } = sanitizeInputForOpenAI([call, { type: 'function_call_output', call_id: 'call_ccb_1', output: 'ok' }, custom]);
+  assert.ok(changed);
+  assert.deepEqual(input.map((item) => item.id), [undefined, undefined, undefined]);
+  assert.deepEqual(input.map((item) => item.call_id), ['call_ccb_1', 'call_ccb_1', 'call_ccb_2']);
+});
