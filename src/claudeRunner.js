@@ -60,19 +60,21 @@ const EFFORT = {
 
 let capabilityCache = null;
 export async function claudeCapabilities(claudePath) {
-  if (capabilityCache) return capabilityCache;
+  if (capabilityCache?.claudePath === claudePath) return capabilityCache.capabilities;
   const help = await new Promise((resolve) => {
     execFile(claudePath, ['--help'], { timeout: 15000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) =>
-      resolve(err && !stdout ? '' : `${stdout}\n${stderr}`),
+      resolve(err ? '' : `${stdout}\n${stderr}`.trim()),
     );
   });
-  capabilityCache = {
+  const capabilities = {
     ok: help.length > 0,
     permissionPrompts: help.includes('--permission-prompts'),
     effort: help.includes('--effort'),
     partial: help.includes('--include-partial-messages'),
   };
-  return capabilityCache;
+  // A startup timeout or temporarily missing executable must not disable Claude until restart.
+  if (capabilities.ok) capabilityCache = { claudePath, capabilities };
+  return capabilities;
 }
 
 // Serialize turns per Claude session so two requests never resume the same session at once.

@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-26T17:12:00Z
+**Trigger:** User's Agent Flow chat reported "Couldn't start Claude Code" and suggested logging in.
+**Symptom:** Claude's current CLI and account status worked, but every bridge turn stopped before the runner started.
+**Root cause:** The service started at 14:58:40 UTC and logged its CLI failure exactly 15 seconds later, matching the startup help-probe timeout. `claudeCapabilities` cached that negative result permanently, so later requests could not recover. The generic error also suggested auth even though this check only runs `--help`.
+**Fix:** Cache only successful probes, keyed by executable path. A subsequent request retries a failed probe without restarting or reauthenticating.
+**Guard:** Regression tests reproduce a real 15-second startup timeout and then successful recovery in the same module instance, plus missing/failed executables, nonzero output and a different executable path. All 37 bridge tests pass.
+---
+
+---
 **Date:** 2026-09-26T11:50:00Z
 **Trigger:** Claude recommended switching to GPT for a browser screenshot despite the tool-handoff implementation being present.
 **Symptom:** The live service had no `codex tools for claude` messages; its process started before the tool-handoff commit and still had a pending idle reload.
