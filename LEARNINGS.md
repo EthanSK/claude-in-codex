@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-26T11:50:00Z
+**Trigger:** Claude recommended switching to GPT for a browser screenshot despite the tool-handoff implementation being present.
+**Symptom:** The live service had no `codex tools for claude` messages; its process started before the tool-handoff commit and still had a pending idle reload.
+**Root cause:** Persistent connections prevented the source watcher from restarting the old runtime. The tool-handoff and subsequent question/side-chat changes were also committed locally but absent from the public main branch.
+**Fix:** Ran all 35 regression tests, restarted the service under the user's existing authorization, verified a new PID and GPT WebSocket reconnections, and pushed the missing commits. Added the runtime/tool-catalog checks to README troubleshooting.
+**Guard:** Real Opus turns through the installed bridge emitted `handed js to codex` and received actual native-app inventory. Standalone CLI browser inventory failed to load its request-header policy even after one retry; direct desktop Codex inventory succeeded with Chrome and the in-app browser. Dictionary screenshot testing was refused by Codex's app approval, so no screenshot or click acceptance is claimed. Preserve those approval boundaries; inventory alone is not proof of screenshot or input success.
+---
+
+---
 **Date:** 2026-09-25T20:40:00Z
 **Trigger:** User: a new side chat just shows "Thinking 0s" and never answers
 **Symptom:** An Opus side chat opened from a task whose Opus turn was running a long typecheck stayed at "Thinking 0s" for 2.5 minutes until stopped. Codex logs showed the request sent at 21:22:51 local time; the bridge log showed no `claude turn` line for it.
