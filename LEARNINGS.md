@@ -29,7 +29,7 @@ Each entry looks like:
 **Symptom:** Claude's current CLI and account status worked, but every bridge turn stopped before the runner started.
 **Root cause:** The service started at 14:58:40 UTC and logged its CLI failure exactly 15 seconds later, matching the startup help-probe timeout. `claudeCapabilities` cached that negative result permanently, so later requests could not recover. The generic error also suggested auth even though this check only runs `--help`.
 **Fix:** Cache only successful probes, keyed by executable path. A subsequent request retries a failed probe without restarting or reauthenticating.
-**Guard:** Regression tests reproduce a real 15-second startup timeout and then successful recovery in the same module instance, plus missing/failed executables, nonzero output and a different executable path. All 37 bridge tests pass.
+**Guard:** Regression tests reproduce a real 15-second startup timeout and then successful recovery in the same module instance, plus missing/failed executables, nonzero output and a different executable path. All 37 bridge tests pass. Installed service restarted at 17:13:28 UTC, confirmed the real CLI within 0.4 seconds, and resumed the affected Agent Flow desktop chat with Opus; an actual assistant reply followed. GPT WebSocket reconnections also appeared after restart. No login was required.
 ---
 
 ---
