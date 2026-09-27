@@ -201,6 +201,8 @@ The bridge passes `--dangerously-skip-permissions` on both new and resumed turns
 
 ## Troubleshooting
 
+- **The picker shrinks to GPT-5.5, Opus and Fable, or the current model says Custom.** Older Codex clients receive a different GPT catalogue from newer desktop clients. Earlier bridge versions kept one shared fallback, so an older client could replace the desktop's list during an upstream outage. The bridge now keeps successful catalogues separately by endpoint, request query (including client version) and account context. If no matching cached list exists, it returns a catalogue error instead of a successful incomplete list. Update/reload the bridge, then reopen the affected chat's picker after Codex refreshes its model list. A different client's success does not establish that this chat refreshed.
+
 - **Claude models don't show in the picker.** Quit Codex completely (Cmd+Q) and reopen it. Check `curl http://127.0.0.1:18787/health` and that `~/.codex/config.toml` starts with the `openai_base_url` line.
 - **The installer says the port is in use.** Something else is on 18787; the installer names it. Run `CODEX_CLAUDE_BRIDGE_PORT=18888 ./scripts/install.sh`. The default isn't 8787 because that's `wrangler dev`'s default.
 - **Claude is selected but GPT answers.** Update the bridge (`git pull`); Codex's request format changes between versions. Then check the log for `claude turn model=…` lines.

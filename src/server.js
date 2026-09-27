@@ -179,6 +179,11 @@ export function createBridge(config = loadConfig(), state = new State()) {
   }
 
   async function handleModels(req, res, subpath, query) {
+    // An older client receives a different GPT list; sharing its fallback made GPT-6
+    // disappear in the desktop picker during outages. Hash account context, never credentials.
+    const cacheKey = crypto.createHash('sha256').update(JSON.stringify([
+      config.upstream, query, req.headers['chatgpt-account-id'] || req.headers.authorization || null,
+    ])).digest('hex');
     let upstreamModels = null;
     let etag = null;
     try {
@@ -188,16 +193,22 @@ export function createBridge(config = loadConfig(), state = new State()) {
       });
       if (r.ok) {
         const json = await r.json();
+        if (!Array.isArray(json.models)) throw new Error('model catalog response has no model list');
         upstreamModels = json.models;
         etag = r.headers.get('etag');
-        state.setUpstreamModels(upstreamModels);
+        state.setUpstreamModels(upstreamModels, cacheKey);
       } else {
         log.error(`model catalog upstream returned ${r.status}`);
       }
     } catch (err) {
       log.error(`model catalog fetch failed: ${err.message}`);
     }
-    if (!upstreamModels) upstreamModels = state.data.upstreamModels || [];
+    if (!upstreamModels) upstreamModels = state.data.upstreamCatalogs[cacheKey];
+    if (!upstreamModels) {
+      // A successful Claude-only response would replace Codex's full list with an incomplete one.
+      res.writeHead(503, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ error: { message: 'Model catalog unavailable; no cached catalog for this client.', type: 'server_error' } }));
+    }
     const models = mergeCatalog(config, state, upstreamModels);
     const headers = { 'content-type': 'application/json' };
     if (etag) {

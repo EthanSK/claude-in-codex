@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-09-27T11:58:00Z
+**Trigger:** User's Codex picker showed only GPT-5.5, Opus and Fable; the current model said Custom and the companion bar could not switch.
+**Symptom:** The bridge logged upstream catalogue timeouts/network failures, while logs also showed older 0.145.0 and desktop 0.158.0 clients sharing it. The persisted catalogue later recovered, but the affected UI had retained the smaller list.
+**Root cause:** `handleModels` used one `state.upstreamModels` fallback for every client. Direct authenticated read-only queries proved the older version's list omits GPT-6. With configured GPT-5.6 hiding, that older list produces the screenshot's three visible models. An isolated regression proves that another client or account overwrites the fallback. The screenshot itself does not record the exact upstream request that populated that UI.
+**Fix:** Persist successful lists by a hash of endpoint, query and account context. Do not reuse the legacy unscoped list on an outage. Return 503 when no scoped cache exists, rather than a successful partial catalogue. Reject malformed upstream lists without overwriting good cached data. The companion bar separately recognises Custom model controls without inventing a selected model; its typing route is unchanged.
+**Guard:** Integration coverage includes two client versions, two accounts, upstream outages, persistence across service restart, malformed responses and an uncached version. The old implementation fails this regression.
+---
+
+---
 **Date:** 2026-09-26T17:12:00Z
 **Trigger:** User's Agent Flow chat reported "Couldn't start Claude Code" and suggested logging in.
 **Symptom:** Claude's current CLI and account status worked, but every bridge turn stopped before the runner started.

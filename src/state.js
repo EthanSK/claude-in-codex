@@ -5,11 +5,12 @@ import { BRIDGE_HOME } from './config.js';
 // Small persistent store:
 // - sessions[sid].lastTurnId: newest completed bridged turn, used to spot rollbacks/forks
 // - contextWindows[model]: real context window reported by Claude Code
-// - upstreamModels: last good GPT catalog, served if chatgpt.com is unreachable
+// - upstreamModels: last observed GPT catalog for housekeeping model selection
+// - upstreamCatalogs: successful catalogs by request context, served during upstream outages
 export class State {
   constructor(file = path.join(BRIDGE_HOME, 'state.json')) {
     this.file = file;
-    this.data = { sessions: {}, contextWindows: {}, upstreamModels: null };
+    this.data = { sessions: {}, contextWindows: {}, upstreamModels: null, upstreamCatalogs: {} };
     try {
       this.data = { ...this.data, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
     } catch {
@@ -48,8 +49,9 @@ export class State {
     return this.data.contextWindows[model] ?? null;
   }
 
-  setUpstreamModels(models) {
+  setUpstreamModels(models, cacheKey) {
     this.data.upstreamModels = models;
+    this.data.upstreamCatalogs[cacheKey] = models;
     this.save();
   }
 
