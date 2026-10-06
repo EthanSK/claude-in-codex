@@ -332,16 +332,18 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       finishWebSearches(ctx, stream);
       stream.closeOpen('commentary');
       // A marker lets a fresh Claude process resume this session if the bridge restarts before Codex replies.
+      let marker;
       if (ctx.sid) {
         const turnId = rid('t');
-        stream.marker(makeMarker(ctx.sid, turnId));
+        marker = makeMarker(ctx.sid, turnId);
+        stream.marker(marker);
         state.recordTurn(ctx.sid, turnId, parsed.threadId);
       }
       for (const call of calls) {
         stream.codexToolCall(call);
         waiting.set(call.callId, call);
       }
-      waitForCodexResults(calls, turn);
+      waitForCodexResults(calls, turn, marker);
       log.info(`handed ${calls.map((call) => call.entry.name).join(', ')} to codex`);
       stream.complete(usageSoFar(ctx), { endTurn: false });
       stream = null;

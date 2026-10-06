@@ -239,7 +239,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
     stream.begin();
 
     // Codex ran tools a waiting Claude turn asked for: that same Claude process continues in this response.
-    const results = findCodexResults(body.input);
+    const results = findCodexResults(body.input, threadId);
     if (results) {
       results.turn.resume(stream, results);
       return;

@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-06T20:59:30Z
+**Trigger:** The first installed sub-agent check still stopped before its GPT follow-up despite an earlier isolated pass.
+**Symptom:** Both children replied, but Claude said the user had rejected its wait. A captured isolated request showed the bridge session marker immediately followed by the child mailbox item, with the pending `wait_agent` call entirely absent.
+**Root cause:** The first mailbox fix expected Codex to retain the preempted call. Codex can remove both that call and its result before delivering the ready message; a successful run with ordinary tool results did not exercise this path.
+**Fix:** Store the existing response marker with each pending tool, match mailbox arrivals using that marker when the wait call is absent, and require the owning thread to match. Resume only a lone pending collaboration wait, never invent results for other simultaneous tools, and preserve explicit human interruption.
+**Guard:** The marker-only replay regression fails against the first fix. The WebSocket integration test reconnects without the wait call and proves one Claude process receives the actual child reply. Unit checks cover human Stop/new text/images, historical mailbox items, inherited markers in another thread and unrelated/parallel tools. All 50 current tests pass (49-test suite plus the added WebSocket regression and targeted rerun). An isolated real Opus 5.5 parent again completed GPT-6.1 Sol and Fable 5.1 spawns and a GPT follow-up with the three expected tokens. Installed verification remains separate.
+---
+
+---
 **Date:** 2026-10-06T20:49:50Z
 **Trigger:** A GPT sub-agent spawned by bridged Claude failed immediately with `invalid_encrypted_content` for an `amsg_` item.
 **Symptom:** The child transcript stored the parent's ordinary task text inside an `encrypted_content` part. The failure also occurred with `fork_turns: none`, so it was not inherited Claude compaction.

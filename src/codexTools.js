@@ -136,8 +136,8 @@ export class CodexToolServer {
 }
 
 /** Remembers calls handed to Codex so its next request can resume the waiting Claude turn. */
-export function waitForCodexResults(calls, turn) {
-  for (const call of calls) waitingCalls.set(call.callId, turn);
+export function waitForCodexResults(calls, turn, marker) {
+  for (const call of calls) waitingCalls.set(call.callId, { turn, entry: call.entry, marker });
 }
 
 /** Forgets calls whose Claude process has ended. */
@@ -149,7 +149,7 @@ export function forgetCodexCalls(callIds) {
  * Finds a Claude turn waiting on tool results in this request's input.
  * @returns {{ turn: object, outputs: Map<string, unknown>, userText: string } | null}
  */
-export function findCodexResults(input) {
+export function findCodexResults(input, threadId) {
   if (!Array.isArray(input)) return null;
   let turn = null;
   let lastOutput = -1;
@@ -157,20 +157,24 @@ export function findCodexResults(input) {
   input.forEach((item, index) => {
     if (item?.type !== 'function_call_output' && item?.type !== 'custom_tool_call_output') return;
     const waiting = waitingCalls.get(item.call_id);
-    if (!waiting) return;
-    turn = waiting;
+    if (!waiting || (threadId && waiting.turn.threadId !== threadId)) return;
+    turn = waiting.turn;
     lastOutput = index;
     outputs.set(item.call_id, item.output);
   });
   if (!turn) {
-    const waitIndex = input.findLastIndex((item) => item?.type === 'function_call' && item.namespace === 'collaboration' && item.name === 'wait_agent' && waitingCalls.has(item.call_id));
-    const arrivals = input.slice(waitIndex + 1);
-    const userIntervened = arrivals.some((item) => item?.type === 'message' && item.role === 'user' && item.content?.some((part) => part.type === 'input_image' || (part.type === 'input_text' && ['prompt', 'aborted'].includes(classifyUserText(part.text)))));
-    if (waitIndex >= 0 && arrivals.some((item) => item?.type === 'agent_message') && !userIntervened) { // Codex preempts wait_agent to deliver a mailbox item without a tool result; killing Claude here falsely records a user cancellation.
-      const callId = input[waitIndex].call_id;
-      turn = waitingCalls.get(callId);
+    for (const [callId, waiting] of waitingCalls) {
+      if (waiting.entry?.namespace !== 'collaboration' || waiting.entry.name !== 'wait_agent') continue;
+      if (threadId && waiting.turn.threadId !== threadId) continue; // A fork can inherit the marker but must never resume the parent's pending tool.
+      if ([...waitingCalls.values()].some((other) => other.turn === waiting.turn && other !== waiting)) continue; // A mailbox wake must not fabricate results for another tool handed off alongside this wait.
+      const waitIndex = input.findLastIndex((item) => item?.call_id === callId || (waiting.marker && item?.encrypted_content === waiting.marker)); // Codex can remove the preempted wait call entirely; its preceding session marker survives.
+      const arrivals = input.slice(waitIndex + 1);
+      const userIntervened = arrivals.some((item) => item?.type === 'message' && item.role === 'user' && item.content?.some((part) => part.type === 'input_image' || (part.type === 'input_text' && ['prompt', 'aborted'].includes(classifyUserText(part.text)))));
+      if (waitIndex < 0 || !arrivals.some((item) => item?.type === 'agent_message') || userIntervened) continue;
+      turn = waiting.turn;
       lastOutput = waitIndex;
       outputs.set(callId, 'The bridge ended this pending wait because Codex delivered an agent message. Read the attached message; this is not a user cancellation.');
+      break;
     }
   }
   if (!turn) return null;
@@ -191,7 +195,7 @@ export function findCodexResults(input) {
 /** Cancels Claude turns in this Codex thread that are still waiting for tool results. */
 export async function cancelWaitingCodexTurns(threadId) {
   if (!threadId) return;
-  const turns = new Set([...waitingCalls.values()].filter((turn) => turn.threadId === threadId));
+  const turns = new Set([...waitingCalls.values()].map((waiting) => waiting.turn).filter((turn) => turn.threadId === threadId));
   await Promise.all([...turns].map((turn) => turn.cancel()));
 }
 

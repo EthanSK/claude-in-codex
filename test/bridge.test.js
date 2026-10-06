@@ -969,6 +969,39 @@ test('WebSocket follow-ups carrying only Codex tool results continue the waiting
   }
 });
 
+test('a mailbox reply reconnects without the preempted wait call and keeps the same Claude process', async () => {
+  process.env.FAKE_CLAUDE_SCENARIO = 'codex-tools';
+  process.env.FAKE_CODEX_TOOL = 'collaboration__wait_agent';
+  const sockets = [];
+  try {
+    fs.rmSync(claudeLog, { force: true });
+    const tools = [{ type: 'namespace', name: 'collaboration', tools: [{ type: 'function', name: 'wait_agent', parameters: { type: 'object', properties: {} } }] }];
+    const input = [perms, envContext(workdir), userMsg('Wait for the child reply.')];
+    const body = (items) => ({ ...JSON.parse(responsesBody('claude-opus-5-5', items, { tools })), client_metadata: { thread_id: 'mailbox-thread' } });
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`);
+    sockets.push(socket);
+    await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+    const first = await webSocketTurn(socket, body(input));
+    assert.equal(first.response.output.find((item) => item.type === 'function_call').name, 'wait_agent');
+    socket.close();
+    const replay = first.response.output.filter((item) => item.type !== 'function_call'); // Real Codex removes the preempted call but retains the bridge's preceding marker.
+    const nextSocket = new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`);
+    sockets.push(nextSocket);
+    await new Promise((resolve, reject) => { nextSocket.once('open', resolve); nextSocket.once('error', reject); });
+    const message = { type: 'agent_message', author: '/root/child', recipient: '/root', content: [{ type: 'input_text', text: 'Child result: apricot' }] };
+    const second = await webSocketTurn(nextSocket, body([...input, ...replay, message]));
+    const final = second.response.output.find((item) => item.type === 'message').content[0].text;
+    assert.match(final, /not a user cancellation/);
+    assert.match(final, /Codex agent message from \/root\/child to \/root:\nChild result: apricot/);
+    assert.equal(second.response.end_turn, true);
+    assert.equal(readClaudeLog().length, 1, 'mailbox preemption must not cancel and restart Claude');
+  } finally {
+    sockets.forEach((socket) => socket.close());
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+    delete process.env.FAKE_CODEX_TOOL;
+  }
+});
+
 test('a new message without the tool results stops the waiting Claude turn before resuming its session', async () => {
   process.env.FAKE_CLAUDE_SCENARIO = 'codex-tools';
   try {
