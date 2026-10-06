@@ -225,7 +225,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
       res.end(JSON.stringify({ error: previousResponseError(body.previous_response_id) }));
       return;
     }
-    const parsed = parseCodexRequest(body, (sid, turnId) => state.isLatestTurn(sid, turnId));
+    const parsed = parseCodexRequest(body, (sid, turnId) => state.isLatestTurn(sid, turnId), (sid) => state.agentMessageIds(sid));
     // Log request structure, never prompt text or credentials, when tracing missing side-chat context.
     log.debug(`Claude request shape ${JSON.stringify({ keys: Object.keys(body), inputCount: Array.isArray(body.input) ? body.input.length : 0, sandboxMode: parsed.sandboxMode, hasCwd: Boolean(parsed.cwd), hasResume: Boolean(parsed.resume) })}`);
     // Side chats / forked threads start from the parent's history: give them their own
@@ -264,7 +264,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
       }
       const turnId = rid('t');
       stream.compaction(newSid ? makeMarker(newSid, turnId) : 'ccb:v1:none:none');
-      if (newSid) state.recordTurn(newSid, turnId, parsed.threadId);
+      if (newSid) state.recordTurn(newSid, turnId, parsed.threadId, state.agentMessageIds(sid)); // Compaction does not deliver new messages, and a fork inherits only IDs already received by its parent.
       stream.complete(usageObject());
       return;
     }

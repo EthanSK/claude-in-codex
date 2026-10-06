@@ -307,8 +307,9 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     const waiting = new Map(); // callId -> call handed to Codex
     const turn = {
       threadId: parsed.threadId,
+      agentMessageIds: new Set(parsed.agentMessageIds),
       // Codex sent the results: continue this same Claude process in Codex's new response.
-      resume(nextStream, { outputs, userText, userAttachments }) {
+      resume(nextStream, { outputs, userText, userAttachments, agentMessageIds }) {
         stream = nextStream;
         watchClient(stream.res);
         const calls = [...waiting.values()];
@@ -324,6 +325,8 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
           }
           call.reply(content);
         });
+        for (const id of agentMessageIds) turn.agentMessageIds.add(id);
+        if (ctx.sid && agentMessageIds.length) state.recordAgentMessageIds(ctx.sid, [...turn.agentMessageIds]); // Save acknowledgements after replying; replay/reconnect must not repeat the delivery.
         for (const ev of heldEvents.splice(0)) handle(ev);
         scheduleCodexHandoff();
       },
@@ -358,7 +361,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
         const turnId = rid('t');
         marker = makeMarker(ctx.sid, turnId);
         stream.marker(marker);
-        state.recordTurn(ctx.sid, turnId, parsed.threadId);
+        state.recordTurn(ctx.sid, turnId, parsed.threadId, [...turn.agentMessageIds]);
       }
       for (const call of calls) {
         stream.codexToolCall(call);
@@ -402,7 +405,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     if (ctx.sid) {
       const turnId = rid('t');
       stream.marker(makeMarker(ctx.sid, turnId));
-      state.recordTurn(ctx.sid, turnId, parsed.threadId);
+      state.recordTurn(ctx.sid, turnId, parsed.threadId, [...turn.agentMessageIds]);
     }
 
     for (const mu of Object.values(r?.modelUsage || {})) {

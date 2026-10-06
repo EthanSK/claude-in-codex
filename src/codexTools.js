@@ -170,7 +170,7 @@ export function findCodexResults(input, threadId) {
       const waitIndex = input.findLastIndex((item) => item?.call_id === callId || (waiting.marker && item?.encrypted_content === waiting.marker)); // Codex can remove the preempted wait call entirely; its preceding session marker survives.
       const arrivals = input.slice(waitIndex + 1);
       const userIntervened = arrivals.some((item) => item?.type === 'message' && item.role === 'user' && item.content?.some((part) => part.type === 'input_image' || (part.type === 'input_text' && ['prompt', 'aborted'].includes(classifyUserText(part.text)))));
-      if (waitIndex < 0 || !arrivals.some((item) => item?.type === 'agent_message') || userIntervened) continue;
+      if (waitIndex < 0 || !arrivals.some((item) => normalizeAgentMessageForClaude(item) !== item && !waiting.turn.agentMessageIds?.has(item.id)) || userIntervened) continue;
       turn = waiting.turn;
       lastOutput = waitIndex;
       outputs.set(callId, 'The bridge ended this pending wait because Codex delivered an agent message. Read the attached message; this is not a user cancellation.');
@@ -184,7 +184,13 @@ export function findCodexResults(input, threadId) {
   const messagesStart = markerIndex >= 0 ? markerIndex : callIndex >= 0 ? callIndex : lastOutput; // Full replays can put a new message before the tool result; deltas without the call or marker start at the result.
   const userText = [];
   const userAttachments = [];
-  for (const item of input.slice(messagesStart + 1).map(normalizeAgentMessageForClaude)) {
+  const agentMessageIds = [];
+  for (const [index, rawItem] of input.entries()) {
+    const item = normalizeAgentMessageForClaude(rawItem);
+    if (item !== rawItem && typeof item.id === 'string') {
+      if (turn.agentMessageIds?.has(item.id) || agentMessageIds.includes(item.id)) continue;
+      agentMessageIds.push(item.id); // Scan unread agent deliveries even before the current marker; native work can emit that marker after Codex received the message.
+    } else if (index <= messagesStart) continue;
     if (item?.type !== 'message' || item.role !== 'user') continue;
     for (const part of item.content || []) {
       if (part?.type === 'input_image') userAttachments.push(...codexOutputToMcp([part])); // A screenshot sent while a Codex tool runs must reach the waiting Claude process, not just its accompanying text.
@@ -194,7 +200,7 @@ export function findCodexResults(input, threadId) {
       else if (kind === 'aborted') userText.push('(The user stopped the turn while this tool was running.)');
     }
   }
-  return { turn, outputs, userText: userText.join('\n\n'), userAttachments };
+  return { turn, outputs, userText: userText.join('\n\n'), userAttachments, agentMessageIds };
 }
 
 /** Cancels Claude turns in this Codex thread that are still waiting for tool results. */

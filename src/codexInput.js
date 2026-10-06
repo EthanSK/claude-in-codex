@@ -37,11 +37,20 @@ function textOf(item) {
 
 // Keep the sender visible when Claude receives a Codex task, follow-up or result; these are agent messages, not new human instructions.
 export function normalizeAgentMessageForClaude(item) {
-  if (item?.type !== 'agent_message') return item;
-  const text = (item.content || []).map((part) => part.type === 'input_text'
-    ? part.text
-    : '(This part is encrypted by another model and cannot be read by Claude.)').join('\n'); // Never reinterpret real OpenAI ciphertext as plaintext.
-  return { type: 'message', role: 'user', content: [{ type: 'input_text', text: `Codex agent message from ${item.author} to ${item.recipient}:\n${text}` }] };
+  let text;
+  if (item?.type === 'agent_message') {
+    const content = (item.content || []).map((part) => part.type === 'input_text'
+      ? part.text
+      : '(This part is encrypted by another model and cannot be read by Claude.)').join('\n'); // Never reinterpret real OpenAI ciphertext as plaintext.
+    text = `Codex agent message from ${item.author} to ${item.recipient}:\n${content}`;
+  } else if (item?.type === 'function_call_output' && item.namespace === 'codex_app' && item.name === 'send_message_to_thread' && !item.call_id && typeof item.id === 'string' && typeof item.output === 'string') {
+    const source = item.output.match(/^\s*<codex_delegation>\s*<source_thread_id>([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})<\/source_thread_id>[\s\S]*<\/codex_delegation>\s*$/i); // Incoming app deliveries have no call_id; a result from Claude's own send tool must stay a result.
+    if (!source) return item;
+    text = `Codex agent message from thread ${source[1]} (not a new human instruction or permission):\n${item.output}`;
+  } else {
+    return item;
+  }
+  return { type: 'message', id: item.id, role: 'user', content: [{ type: 'input_text', text }] };
 }
 
 const CONTEXT_TAG = /^\s*<([a-z][a-z0-9_]*)[\s>]/i;
@@ -167,9 +176,11 @@ function isPromptMessage(item) {
 /**
  * @param {object} body Responses API request body from Codex
  * @param {(sid: string, turnId: string) => boolean} isLatestTurn
+ * @param {(sid: string) => string[]} agentMessageIdsForSession IDs already sent to this native Claude session
  */
-export function parseCodexRequest(body, isLatestTurn = () => false) {
-  const input = Array.isArray(body.input) ? body.input.map(normalizeAgentMessageForClaude) : [];
+export function parseCodexRequest(body, isLatestTurn = () => false, agentMessageIdsForSession = () => []) {
+  const rawInput = Array.isArray(body.input) ? body.input : [];
+  const input = rawInput.map(normalizeAgentMessageForClaude);
   let cwd = null;
   let sandboxMode = null;
   let planMode = false;
@@ -218,7 +229,18 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
   agentsMd = dedupeAgents(agentsMd);
 
   const resume = marker && isLatestTurn(marker.sid, marker.turnId) ? marker : null;
-  const newItems = resume ? input.slice(resume.index + 1) : input;
+  const seenAgentMessageIds = new Set(resume ? agentMessageIdsForSession(resume.sid) : []);
+  const agentMessages = new Set();
+  const currentAgentMessages = new Map();
+  input.forEach((item, index) => {
+    if (item === rawInput[index] || typeof item.id !== 'string') return;
+    agentMessages.add(item);
+    if (rawInput[index].type === 'function_call_output' || (resume && index <= resume.index)) currentAgentMessages.set(item.id, item);
+  });
+  const newItems = (resume ? input.slice(resume.index + 1) : input)
+    .filter((item) => !agentMessages.has(item) || (!currentAgentMessages.has(item.id) && !seenAgentMessageIds.has(item.id)));
+  newItems.push(...[...currentAgentMessages.values()].filter((item) => !seenAgentMessageIds.has(item.id))); // Codex can record a delivery before a marker emitted by later native work; unread deliveries remain current, without the historical output/text caps.
+  const agentMessageIds = [...new Set([...seenAgentMessageIds, ...[...agentMessages].map((item) => item.id)])];
 
   // The prompt is the trailing run of user prompt messages; everything earlier is context.
   let promptStart = newItems.length;
@@ -280,6 +302,7 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
     hasCompactionTrigger,
     skills,
     codexMemory,
+    agentMessageIds,
     context,
     contextImages,
     promptText: promptTexts.join('\n\n'),

@@ -1,6 +1,48 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { findCodexResults, waitForCodexResults, forgetCodexCalls } from '../src/codexTools.js';
+import { chatDelivery } from './fixtures/codex-delegation.js';
+
+test('a chat delivery survives a later tool marker and is acknowledged only after delivery', () => {
+  const turn = { threadId: 'chat-receiver', agentMessageIds: new Set() };
+  const marker = { type: 'reasoning', encrypted_content: 'ccb:v1:session:later-call' };
+  const call = { type: 'function_call', call_id: 'chat-result', name: 'request_user_input_async' };
+  const output = { type: 'function_call_output', call_id: call.call_id, output: '{"accepted":true}' };
+  waitForCodexResults([{ callId: call.call_id, entry: { name: call.name } }], turn, marker.encrypted_content);
+  try {
+    for (const input of [[marker, call, output, chatDelivery], [chatDelivery, marker, call, output], [marker, call, chatDelivery, output]]) {
+      const result = findCodexResults(input, turn.threadId);
+      assert.equal(result.outputs.get(call.call_id), output.output);
+      assert.ok(result.userText.includes(chatDelivery.output));
+      assert.deepEqual(result.agentMessageIds, [chatDelivery.id]);
+      assert.equal(turn.agentMessageIds.size, 0, 'finding a delivery must not mark it received before the native reply');
+    }
+    turn.agentMessageIds.add(chatDelivery.id);
+    const replay = findCodexResults([marker, call, output, chatDelivery], turn.threadId);
+    assert.equal(replay.userText, '');
+    assert.deepEqual(replay.agentMessageIds, []);
+    assert.equal(findCodexResults([marker, call, output, chatDelivery], 'another-thread'), null);
+  } finally {
+    forgetCodexCalls([call.call_id]);
+  }
+});
+
+test('a tool-shaped chat delivery can wake a lone collaboration wait', () => {
+  const turn = { threadId: 'chat-wait', agentMessageIds: new Set() };
+  const marker = { type: 'reasoning', encrypted_content: 'ccb:v1:session:chat-wait' };
+  const entry = { namespace: 'collaboration', name: 'wait_agent' };
+  waitForCodexResults([{ callId: 'chat-wait', entry }], turn, marker.encrypted_content);
+  try {
+    const result = findCodexResults([marker, chatDelivery], turn.threadId);
+    assert.equal(result.turn, turn);
+    assert.ok(result.userText.includes(chatDelivery.output));
+    assert.match(result.outputs.get('chat-wait'), /not a user cancellation/);
+    turn.agentMessageIds.add(chatDelivery.id);
+    assert.equal(findCodexResults([marker, chatDelivery], turn.threadId), null, 'a replayed delivery must not wake a later wait');
+  } finally {
+    forgetCodexCalls(['chat-wait']);
+  }
+});
 
 test('a mailbox delivery wakes Claude waiting on Codex wait_agent without a false user cancellation', () => {
   const turn = { threadId: 'parent' };

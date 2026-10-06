@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-06T23:04:00Z
+**Trigger:** The historical audit received an additional report that an Opus turn never saw a design clarification relayed from a side chat.
+**Symptom:** Codex recorded a `codex_app.send_message_to_thread` delivery immediately after a question-card result; the corresponding native tool result contained only the question acceptance. The delivery reached the transcript much later through an explicit rollout-file read. A bounded sweep found 132 desktop deliveries with this same shape.
+**Root cause:** These unsolicited `function_call_output` items have an item ID, no `call_id`, and a `<codex_delegation>` wrapper. The normalizer handled only collaboration `agent_message` items, while the continuation collector ignored unrelated tool outputs. Scanning only after a pending marker could also miss a delivery recorded before native work emitted a later marker.
+**Fix:** Normalize the actual app delivery shape with its sender and full wrapper retained; preserve ordinary tool results and quoted wrappers. Deliver unread agent messages through the next Codex tool continuation or resumed prompt, retaining delivered IDs in the existing session state to prevent replay after native/service restarts and forked compaction. No transcript polling, automatic cross-chat messaging, permission transfer, native-work interruption or extra model turn is introduced.
+**Guard:** Five new positive regressions fail against `0ee85bf`, while the negative tool-output guard already passes there. All 69 current tests pass. HTTP integration verifies same-process delivery, a resumed prompt without duplication and reloaded ID state; unit cases cover new/resumed turns, long deliveries, messages before/after results and later markers, another-thread rejection and lone collaboration waits. A real isolated Claude Code 2.1.292 / Fable 5.1 session received the synthetic delegation once as an MCP result, returned its word and recalled it after resuming; its native transcript confirms the canonical model, one delivery and no repeated wrapper in the resumed prompt. Installed verification remains separate. The bridge can only deliver inputs Codex actually sends, and cannot guarantee model obedience.
+---
+
+---
 **Date:** 2026-10-06T22:00:00Z
 **Trigger:** Ethan requested a historical sweep of previous bridge sessions, Codex logs and native Claude transcripts, with fixes for missed failures.
 **Symptom:** The October 2 bridge log contains an unhandled `write EPIPE` crash in WebSocket rejection. An October 4 native Codex tool call was aborted after 1,803 silent seconds despite the intended 24-hour timeout. Isolated probes additionally reproduced a malformed-frame crash, a stopped queued request starting later, an idle source reload during a waiting Claude turn or disconnected compaction, a stale route after changing the installation port, and a failed uninstall of a one-line config.

@@ -10,6 +10,7 @@ import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import WebSocket from 'ws';
+import { chatDelivery } from './fixtures/codex-delegation.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-test-'));
 process.env.CODEX_CLAUDE_BRIDGE_HOME = tmp;
@@ -1165,6 +1166,38 @@ test('Claude asks through the desktop question card, and the answer reaches it d
     assert.match(final, /Codex said: \{"accepted":true\}/);
     assert.match(final, /"answer":"Blue"/);
     assert.match(final, /## My request:\nmake it darker/);
+  } finally {
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+    delete process.env.FAKE_CODEX_TOOL;
+  }
+});
+
+test('cross-chat deliveries reach the waiting process and stay acknowledged across session resumes and state reloads', async () => {
+  process.env.FAKE_CLAUDE_SCENARIO = 'codex-tools';
+  process.env.FAKE_CODEX_TOOL = 'request_user_input_async';
+  try {
+    fs.rmSync(claudeLog, { force: true });
+    const headers = { 'content-type': 'application/json', 'thread-id': 'chat-delivery-thread' };
+    const tools = [{ type: 'function', name: 'request_user_input_async', parameters: { type: 'object', properties: {} } }];
+    const input = [perms, envContext(workdir), userMsg('Continue the existing task.')];
+    const first = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', input, { tools }) });
+    const items = doneItems(first.data);
+    const call = items.find((item) => item.type === 'function_call');
+    const replay = [...input, chatDelivery, ...items, { type: 'function_call_output', call_id: call.call_id, output: '{"accepted":true}' }]; // Delivery can precede a marker emitted by Claude's later tool call.
+    const second = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', replay, { tools }) });
+    const final = doneItems(second.data).find((item) => item.type === 'message').content[0].text;
+    assert.ok(final.includes(chatDelivery.output));
+    assert.equal(readClaudeLog().length, 1, 'the original native process receives the message');
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+    const later = [...replay, ...doneItems(second.data), userMsg('Continue.')];
+    await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', later, { tools }) });
+    const calls = readClaudeLog();
+    assert.equal(JSON.parse(calls[1].stdin).message.content[0].text, 'Continue.', 'an acknowledged chat message must not be replayed');
+    const sid = calls[1].args[calls[1].args.indexOf('--resume') + 1];
+    const { State } = await import('../src/state.js');
+    bridge.state.flush();
+    const restored = new State(bridge.state.file);
+    assert.deepEqual(restored.agentMessageIds(sid), [chatDelivery.id]);
   } finally {
     delete process.env.FAKE_CLAUDE_SCENARIO;
     delete process.env.FAKE_CODEX_TOOL;

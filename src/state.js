@@ -28,11 +28,21 @@ export class State {
     return this.data.sessions[sid]?.threadId ?? null;
   }
 
-  recordTurn(sid, turnId, threadId = null) {
+  agentMessageIds(sid) {
+    return this.data.sessions[sid]?.agentMessageIds ?? [];
+  }
+
+  recordAgentMessageIds(sid, agentMessageIds) {
+    this.data.sessions[sid].agentMessageIds = agentMessageIds; // A tool continuation acknowledges messages without advancing the pending session marker.
+    this.save();
+  }
+
+  recordTurn(sid, turnId, threadId = null, agentMessageIds = this.agentMessageIds(sid)) {
     const prev = this.data.sessions[sid] || {};
     this.data.sessions[sid] = {
       lastTurnId: turnId,
       threadId: threadId || prev.threadId || null,
+      agentMessageIds, // Only delivered IDs are retained; replayed cross-chat messages must not consume context again after a process or service restart.
       updatedAt: new Date().toISOString(),
     };
     this.prune();

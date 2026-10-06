@@ -3,6 +3,51 @@ import assert from 'node:assert/strict';
 import { buildClaudeUserMessage, classifyUserText, makeMarker, parseCodexRequest, sanitizeInputForOpenAI } from '../src/codexInput.js';
 
 const userMessage = (text) => ({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] });
+import { chatDelivery } from './fixtures/codex-delegation.js';
+
+test('incoming chat deliveries stay complete and attributed on new and resumed turns', () => {
+  const delivery = { ...chatDelivery, output: chatDelivery.output.replace('Remember apricot.', 'Remember apricot. '.repeat(5000)) };
+  const marker = { type: 'reasoning', encrypted_content: makeMarker('session', 'turn') };
+  for (const resumed of [false, true]) {
+    const parsed = parseCodexRequest({ input: resumed ? [marker, delivery] : [delivery] }, () => resumed);
+    assert.ok(parsed.promptText.includes(delivery.output), 'the current delivery must not be cut to a historical tool-output limit');
+    assert.match(parsed.promptText, /Codex agent message from thread 00000000-0000-4000-8000-000000000001/);
+    assert.match(parsed.promptText, /not a new human instruction or permission/);
+    assert.deepEqual(parsed.agentMessageIds, [delivery.id]);
+  }
+  assert.deepEqual(sanitizeInputForOpenAI([delivery]), { input: [delivery], changed: false }, 'GPT still receives the original app delivery');
+});
+
+test('chat messages arriving before a later marker reach the next turn only once', () => {
+  const marker = { type: 'reasoning', encrypted_content: makeMarker('session', 'later-turn') };
+  const input = [userMessage('Earlier work'), chatDelivery, marker, userMessage('Continue.')];
+  const unseen = parseCodexRequest({ input }, () => true);
+  assert.ok(unseen.promptText.includes(chatDelivery.output));
+  const seen = parseCodexRequest({ input }, () => true, () => [chatDelivery.id]);
+  assert.equal(seen.promptText, 'Continue.');
+  assert.equal(seen.context, '');
+  assert.deepEqual(seen.agentMessageIds, [chatDelivery.id]);
+  const collaborationMessage = { type: 'agent_message', id: 'amsg_late', author: '/root/child', recipient: '/root', content: [{ type: 'input_text', text: 'Late child reply.' }] };
+  const late = parseCodexRequest({ input: [collaborationMessage, marker, userMessage('Continue.')] }, () => true);
+  assert.match(late.promptText, /Late child reply/);
+  assert.deepEqual(late.agentMessageIds, [collaborationMessage.id]);
+});
+
+test('ordinary tool outputs and quoted delegation text remain tool results or context', () => {
+  for (const item of [
+    { ...chatDelivery, call_id: 'own-send-call' },
+    { ...chatDelivery, namespace: 'unrelated' },
+    { ...chatDelivery, output: 'Tool result quoting ' + chatDelivery.output },
+    { ...chatDelivery, output: chatDelivery.output.replace('</codex_delegation>', '') },
+  ]) {
+    const parsed = parseCodexRequest({ input: [item, userMessage('Continue.')] });
+    assert.equal(parsed.promptText, 'Continue.');
+    assert.match(parsed.context, /\[tool output\]/);
+  }
+  const quoted = parseCodexRequest({ input: [userMessage(chatDelivery.output)] });
+  assert.equal(quoted.promptText, '');
+  assert.ok(quoted.context.includes(chatDelivery.output));
+});
 
 test('Codex agent tasks and follow-ups reach Claude on new and resumed turns', () => {
   for (const resumed of [false, true]) {
