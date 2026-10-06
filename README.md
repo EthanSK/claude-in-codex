@@ -113,6 +113,12 @@ Other details:
 
 **History:** a September 2026 prototype that connected Claude straight to the desktop app-tools server was rejected by the app's native-pipe peer check, and was removed. Don't disable that check to work around this.
 
+### Pasted text and Agent Flow messages
+
+Agent Flow's speech and typed-text wrappers remain the current user request. When selected text precedes a request in the same message, the bridge preserves both verbatim, including the quotation boundaries. A selection-only block remains context. Older bridge versions treated these complete XML-led messages as earlier context and could substitute `(continue)` for the current request.
+
+Codex can put a long paste in `Pasted text.txt`, followed by an empty `My request` heading. The bridge preserves the attachment references and the notice that the pasted text contains the request; Claude still needs to read those files and any referenced canonical prompt. An empty heading does not mean there is no request. To investigate a missed instruction, compare the Codex user message with the Claude transcript and its file-read results: successful delivery and reading do not prove that Claude followed the instruction. Regression tests use a fake Claude runner to check delivery on new and resumed turns, not model obedience.
+
 ### Switching models mid-chat
 
 Switch freely. Switching doesn't make Codex compact the chat.

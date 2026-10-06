@@ -1026,6 +1026,22 @@ test('a question-card answer starting a new turn is the user\'s prompt, not back
   assert.equal(classifyUserText('<environment_context><cwd>/x</cwd></environment_context>'), 'environment');
 });
 
+test('Fable receives XML-authored requests verbatim on a new and resumed turn', async () => {
+  fs.rmSync(claudeLog, { force: true });
+  const firstText = '<speech start_at="1" end_at="2">Explain the plan; do not implement it.</speech>';
+  const input = [perms, envContext(workdir), userMsg(firstText)];
+  const first = await request('/backend-api/codex/responses', { headers: { 'content-type': 'application/json' }, body: responsesBody('claude-fable-5-1', input) });
+  assert.equal(first.status, 200);
+  const nextText = '<app_selection><text>Earlier plan</text></app_selection>\n\nAnswer my questions before changing files.';
+  const second = await request('/backend-api/codex/responses', { headers: { 'content-type': 'application/json' }, body: responsesBody('claude-fable-5-1', [...input, ...doneItems(first.data), userMsg(nextText)]) });
+  assert.equal(second.status, 200);
+  const calls = readClaudeLog();
+  assert.equal(calls.length, 2);
+  assert.equal(JSON.parse(calls[0].stdin).message.content[0].text, firstText);
+  assert.equal(JSON.parse(calls[1].stdin).message.content[0].text, nextText);
+  assert.ok(calls[1].args.includes('--resume'));
+});
+
 test('without Codex\'s question tool, Claude is told to ask in plain text and keeps its own tools', async () => {
   fs.rmSync(claudeLog, { force: true });
   await request('/backend-api/codex/responses', { headers: { 'content-type': 'application/json' }, body: responsesBody('claude-opus-5-5', [perms, envContext(workdir), userMsg('hi')]) });
