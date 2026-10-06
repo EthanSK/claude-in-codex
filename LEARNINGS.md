@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-06T19:22:57Z
+**Trigger:** Fable said pasted Agent Flow prompts contained no new request and continued implementation despite a request to answer first.
+**Symptom:** The reported paste reached Claude verbatim, and its file-read results contained both complete canonical prompts, including the instruction not to implement yet. A separate parser reproduction exposed XML-authored requests becoming historical context plus `(continue)`.
+**Root cause:** The reported incident was an instruction-following failure after successful delivery and reading. Independently, `classifyUserText` treated complete XML-root text as context, including speech and typed-text wrappers or selections followed by a current request.
+**Fix:** Commit `631b83d` keeps authored wrappers and requests following context blocks as current prompts, preserving their original quotation boundaries. Pasted-file references with an empty `My request` heading already worked; compare actual Claude input and file-read results before attributing a model's claim to lost transport.
+**Guard:** All 44 tests passed using a fake Claude runner, including Fable new/resumed-turn input equality; three new parser regressions fail against the previous source. Tests cover a long selection, attachment-reference messages and unchanged injected-metadata handling. These checks establish transport behavior, not model obedience; installation requires a separate verified service reload.
+---
+
+---
 **Date:** 2026-09-27T11:58:00Z
 **Trigger:** User's Codex picker showed only GPT-5.5, Opus and Fable; the current model said Custom and the companion bar could not switch.
 **Symptom:** The bridge logged upstream catalogue timeouts/network failures, while logs also showed older 0.145.0 and desktop 0.158.0 clients sharing it. The persisted catalogue later recovered, but the affected UI had retained the smaller list.
