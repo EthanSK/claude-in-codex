@@ -147,7 +147,7 @@ export function forgetCodexCalls(callIds) {
 
 /**
  * Finds a Claude turn waiting on tool results in this request's input.
- * @returns {{ turn: object, outputs: Map<string, unknown>, userText: string } | null}
+ * @returns {{ turn: object, outputs: Map<string, unknown>, userText: string, userAttachments: object[] } | null}
  */
 export function findCodexResults(input, threadId) {
   if (!Array.isArray(input)) return null;
@@ -178,18 +178,23 @@ export function findCodexResults(input, threadId) {
     }
   }
   if (!turn) return null;
-  // Messages after the results were sent while the tool ran (or after stopping the turn); Codex would show them to GPT too.
+  const pending = [...waitingCalls.entries()].filter(([, waiting]) => waiting.turn === turn);
+  const markerIndex = input.findLastIndex((item) => pending.some(([, waiting]) => waiting.marker && item?.encrypted_content === waiting.marker));
+  const callIndex = input.findIndex((item) => ['function_call', 'custom_tool_call'].includes(item?.type) && pending.some(([callId]) => item.call_id === callId));
+  const messagesStart = markerIndex >= 0 ? markerIndex : callIndex >= 0 ? callIndex : lastOutput; // Full replays can put a new message before the tool result; deltas without the call or marker start at the result.
   const userText = [];
-  for (const item of input.slice(lastOutput + 1).map(normalizeAgentMessageForClaude)) {
+  const userAttachments = [];
+  for (const item of input.slice(messagesStart + 1).map(normalizeAgentMessageForClaude)) {
     if (item?.type !== 'message' || item.role !== 'user') continue;
     for (const part of item.content || []) {
+      if (part?.type === 'input_image') userAttachments.push(...codexOutputToMcp([part])); // A screenshot sent while a Codex tool runs must reach the waiting Claude process, not just its accompanying text.
       if (part?.type !== 'input_text') continue;
       const kind = classifyUserText(part.text);
       if (kind === 'prompt' || kind === 'context') userText.push(part.text); // A message can start with Codex context (for example the in-app browser's) before the user's request; dropping it would lose that request.
       else if (kind === 'aborted') userText.push('(The user stopped the turn while this tool was running.)');
     }
   }
-  return { turn, outputs, userText: userText.join('\n\n') };
+  return { turn, outputs, userText: userText.join('\n\n'), userAttachments };
 }
 
 /** Cancels Claude turns in this Codex thread that are still waiting for tool results. */

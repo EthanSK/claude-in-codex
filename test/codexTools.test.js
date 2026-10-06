@@ -35,3 +35,31 @@ test('a mailbox delivery wakes Claude waiting on Codex wait_agent without a fals
     forgetCodexCalls(['pending-wait', 'parallel-tool']);
   }
 });
+
+test('tool continuations keep new text and image pixels on either side of the tool result', () => {
+  const turn = { threadId: 'image-thread' };
+  const marker = { type: 'reasoning', encrypted_content: 'ccb:v1:session:image-turn' };
+  const call = { type: 'custom_tool_call', call_id: 'image-call', name: 'exec' };
+  const output = { type: 'custom_tool_call_output', call_id: call.call_id, output: 'finished' };
+  const historical = { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Old request' }, { type: 'input_image', image_url: 'data:image/png;base64,OLD' }] };
+  const current = { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Check this screenshot instead.' }, { type: 'input_image', image_url: 'data:image/png;base64,NEW' }] };
+  waitForCodexResults([{ callId: call.call_id, entry: { name: 'exec' } }], turn, marker.encrypted_content);
+  try {
+    for (const arrivals of [[current, output], [output, current]]) {
+      const result = findCodexResults([historical, marker, call, ...arrivals], turn.threadId);
+      assert.equal(result.userText, 'Check this screenshot instead.');
+      assert.deepEqual(result.userAttachments, [{ type: 'image', mimeType: 'image/png', data: 'NEW' }]);
+      assert.equal(result.outputs.get(call.call_id), 'finished');
+    }
+    const delta = findCodexResults([output, current], turn.threadId);
+    assert.equal(delta.userText, 'Check this screenshot instead.');
+    assert.deepEqual(delta.userAttachments, [{ type: 'image', mimeType: 'image/png', data: 'NEW' }]);
+    const imageOnly = findCodexResults([marker, call, output, { ...current, content: current.content.slice(1) }], turn.threadId);
+    assert.equal(imageOnly.userText, '');
+    assert.deepEqual(imageOnly.userAttachments, [{ type: 'image', mimeType: 'image/png', data: 'NEW' }]);
+    assert.equal(findCodexResults([marker, call, current], turn.threadId), null, 'a new image without a result still cancels the waiting turn');
+    assert.equal(findCodexResults([marker, call, output, current], 'another-thread'), null);
+  } finally {
+    forgetCodexCalls([call.call_id]);
+  }
+});

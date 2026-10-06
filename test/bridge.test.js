@@ -369,9 +369,9 @@ test('model switch GPT -> Claude carries GPT output as context', async () => {
   const r1 = await request('/backend-api/codex/responses', { body: responsesBody('claude-opus-5-5', input1), headers: { 'content-type': 'application/json' } });
   const out1 = parseSse(r1.data).filter((e) => e.type === 'response.output_item.done').map((e) => e.item);
   const gptTurn = [
-    userMsg('b (to gpt)'),
+    { ...userMsg('b (to gpt)'), content: [{ type: 'input_text', text: 'b (to gpt)' }, { type: 'input_image', image_url: 'data:image/png;base64,GPTHISTORY' }] },
     { type: 'function_call', name: 'shell', arguments: '{"cmd":"ls"}', call_id: 'c1' },
-    { type: 'function_call_output', call_id: 'c1', output: 'file1\nfile2' },
+    { type: 'function_call_output', call_id: 'c1', output: [{ type: 'input_text', text: 'file1\nfile2' }, { type: 'input_image', image_url: 'data:image/png;base64,GPTTOOLIMAGE' }] },
     { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'GPT listed files' }] },
   ];
   const input2 = [...input1, ...out1, ...gptTurn, userMsg('c (to claude)')];
@@ -384,6 +384,7 @@ test('model switch GPT -> Claude carries GPT output as context', async () => {
   assert.match(text, /file1/);
   assert.match(text, /GPT listed files/);
   assert.match(text, /c \(to claude\)$/);
+  assert.deepEqual(JSON.parse(call.stdin).message.content.filter((block) => block.type === 'image').map((block) => block.source.data), ['GPTHISTORY', 'GPTTOOLIMAGE']);
 });
 
 test('GPT requests pass through; bridge items are stripped; zstd bodies decoded', async () => {
@@ -1013,10 +1014,11 @@ test('Claude calls Codex tools that Codex runs, and the same Claude process cont
 
     const output = { type: 'function_call_output', call_id: call.call_id, output: [{ type: 'input_text', text: '3 tasks' }, { type: 'input_image', image_url: 'data:image/png;base64,iVBOR' }] };
     const agentReply = { type: 'agent_message', author: '/root/child', recipient: '/root', content: [{ type: 'input_text', text: 'Child result: apricot' }] };
-    const second = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', [...input1, ...firstItems, output, userMsg('also pin it'), agentReply], { tools: codexTools }) });
+    const arrival = { ...userMsg('also pin it'), content: [{ type: 'input_text', text: 'also pin it' }, { type: 'input_image', image_url: 'data:image/jpeg;base64,USERIMAGE' }] };
+    const second = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', [...input1, ...firstItems, arrival, output, agentReply], { tools: codexTools }) });
     const secondEvents = parseSse(second.data);
     const final = doneItems(second.data).find((item) => item.type === 'message');
-    assert.equal(final.content[0].text, 'Codex said: 3 tasks | [image image/png] | New messages arrived while the tool was running:\n\nalso pin it\n\nCodex agent message from /root/child to /root:\nChild result: apricot');
+    assert.equal(final.content[0].text, 'Codex said: 3 tasks | [image image/png] | New messages arrived while the tool was running:\n\nalso pin it\n\nCodex agent message from /root/child to /root:\nChild result: apricot | [image image/jpeg]');
     assert.equal(final.phase, 'final_answer');
     assert.equal(secondEvents.at(-1).response.end_turn, true);
     assert.equal(readClaudeLog().length, 1, 'no second Claude process');
@@ -1036,8 +1038,9 @@ test('WebSocket follow-ups carrying only Codex tool results continue the waiting
     const call = first.response.output.find((item) => item.type === 'custom_tool_call');
     assert.deepEqual({ name: call.name, input: call.input }, { name: 'exec', input: 'text(1)' });
     assert.equal(first.response.end_turn, false);
-    const second = await webSocketTurn(socket, body([{ type: 'custom_tool_call_output', call_id: call.call_id, output: [{ type: 'input_text', text: '1' }] }], { previous_response_id: first.response.id, client_metadata: { thread_id: 'ws-tools' } }));
-    assert.equal(second.response.output.find((item) => item.type === 'message').content[0].text, 'Codex said: 1');
+    const arrival = { ...userMsg('Check this screenshot.'), content: [{ type: 'input_text', text: 'Check this screenshot.' }, { type: 'input_image', image_url: 'data:image/png;base64,USERIMAGE' }] };
+    const second = await webSocketTurn(socket, body([{ type: 'custom_tool_call_output', call_id: call.call_id, output: [{ type: 'input_text', text: '1' }] }, arrival], { previous_response_id: first.response.id, client_metadata: { thread_id: 'ws-tools' } }));
+    assert.equal(second.response.output.find((item) => item.type === 'message').content[0].text, 'Codex said: 1 | New messages arrived while the tool was running:\n\nCheck this screenshot. | [image image/png]');
     assert.equal(second.response.end_turn, true);
   } finally {
     socket.close();

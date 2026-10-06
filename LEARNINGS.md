@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-06T21:30:00Z
+**Trigger:** Ethan asked whether recent bridge use was efficient and preserved model quality, and what a native SendMessage summary meant.
+**Symptom:** Reproduction found that a user screenshot arriving during a Codex tool continuation lost its pixels, and a message before the tool result lost its text too. A model-switch replay also reduced historical user/tool-result images to text placeholders.
+**Root cause:** `findCodexResults` scanned only after the last output and extracted text only. `parseCodexRequest` rendered historical attachments as text without adding their image blocks to Claude's input. A separate bridge instruction incorrectly recommended relative file links.
+**Fix:** Collect new messages from the owning pending marker/call, preserve base64 image attachments in the same waiting process, and retain historical user/tool-result images with explicit history labels. Resume only images after the last valid Claude marker to avoid resending its existing image history. Tell Claude to use absolute local-file links. URL attachments in MCP continuations remain text URLs; no image downloads or context-storage system were added.
+**Guard:** The new continuation and history-image regressions fail against the previous source. All 55 tests pass, including HTTP/WebSocket handoffs, current/history image separation, another-thread rejection and cancellation without results. A real isolated Fable 5.1 turn read the test image's exact characters after its pixels arrived before the tool result; its native transcript contained the exact base64 data and both response markers named the same session. A separate fresh Fable session also read the earlier GPT-side image correctly without tools, with its pixels present in the native user input. Installed verification remains separate.
+---
+
+---
 **Date:** 2026-10-06T21:13:00Z
 **Trigger:** Local notification helpers lacked a Codex chat ID, a parent lost its native Claude context after a side chat, and native background Agent tasks disappeared between turns.
 **Symptom:** Claude children inherited no chat ID (or the bridge launcher's ID). The side-chat incident ended with `/compact` in the parent's Claude transcript, the state index assigning that session to the side chat, and the parent subsequently starting fresh.

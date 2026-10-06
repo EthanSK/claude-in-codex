@@ -19,7 +19,7 @@ import {
 const BRIDGE_NOTE = [
   'You are running inside the Codex desktop app through a local bridge; the user picked you in Codex\'s model picker.',
   'The user sees your text replies and a one-line summary of each tool you use; they do not see raw tool output.',
-  'Codex renders Markdown. Refer to files by path relative to the working directory.',
+  'Codex renders Markdown. Link local files with their absolute path, optionally followed by :line, so the user can open them in Codex.',
   'The bridge starts one Claude Code process per turn and closes it when you finish. Your native Agent background tasks do not survive that exit: use native agents in the foreground and wait for them before ending your turn.',
 ].join('\n');
 
@@ -299,7 +299,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     const turn = {
       threadId: parsed.threadId,
       // Codex sent the results: continue this same Claude process in Codex's new response.
-      resume(nextStream, { outputs, userText }) {
+      resume(nextStream, { outputs, userText, userAttachments }) {
         stream = nextStream;
         watchClient(stream.res);
         const calls = [...waiting.values()];
@@ -309,7 +309,10 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
           const content = outputs.has(call.callId)
             ? codexOutputToMcp(outputs.get(call.callId))
             : [{ type: 'text', text: 'Codex returned no result for this tool call.' }];
-          if (userText && index === calls.length - 1) content.push({ type: 'text', text: `New messages arrived while the tool was running:\n\n${userText}` }); // Includes Codex agent messages; do not attribute another agent's instructions to the user.
+          if (index === calls.length - 1 && (userText || userAttachments.length)) {
+            content.push({ type: 'text', text: `New messages arrived while the tool was running:\n\n${userText}` }); // Includes Codex agent messages; do not attribute another agent's instructions to the user.
+            content.push(...userAttachments);
+          }
           call.reply(content);
         });
         for (const ev of heldEvents.splice(0)) handle(ev);

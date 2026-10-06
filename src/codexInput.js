@@ -234,10 +234,20 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
   }
 
   const contextLines = [];
+  const contextImages = [];
   for (const it of newItems.slice(0, promptStart)) {
     if (isBridgeItem(it) && !BRIDGE_CONTENT_TYPES.has(it.type)) continue; // A fresh session still needs earlier Claude replies and Codex tool calls; only bridge control items are omitted.
     const line = renderContextItem(it);
     if (line) contextLines.push(line);
+    const historicalParts = it?.type === 'message' && it.role === 'user' ? it.content : ['function_call_output', 'custom_tool_call_output'].includes(it?.type) ? it.output : null;
+    if (Array.isArray(historicalParts)) {
+      for (const part of historicalParts) {
+        if (part.type !== 'input_image') continue;
+        const image = imageBlock(part);
+        const label = it.type === 'message' ? 'Earlier user image' : 'Earlier tool-result image';
+        if (image) contextImages.push({ type: 'text', text: `${label} from this Codex thread, not a new attachment:` }, image); // A model switch must carry the pixels too; a text summary cannot answer visual questions about an earlier screenshot.
+      }
+    }
   }
 
   const promptTexts = [];
@@ -271,6 +281,7 @@ export function parseCodexRequest(body, isLatestTurn = () => false) {
     skills,
     codexMemory,
     context,
+    contextImages,
     promptText: promptTexts.join('\n\n'),
     images,
   };
@@ -298,6 +309,8 @@ export function buildClaudeUserMessage(parsed, { newSession }) {
   if (!text && !parsed.images.length) text = '(continue)';
   const content = [];
   if (text) content.push({ type: 'text', text });
+  content.push(...parsed.contextImages);
+  if (parsed.contextImages.length && parsed.images.length) content.push({ type: 'text', text: 'Current user message attachments:' });
   content.push(...parsed.images);
   return { type: 'user', message: { role: 'user', content } };
 }

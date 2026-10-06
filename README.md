@@ -106,7 +106,7 @@ Other details:
 - Codex's `exec` tool lists every nested tool in its description, about 17 KB. For bridged turns the bridge raises Claude Code's 2,048-character MCP description limit (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`) to the longest Codex description. That higher limit also applies to your other MCP servers in those turns.
 - One MCP call can wait up to 24 hours (`MCP_TOOL_TIMEOUT`), because some tools wait on you, such as a question.
 - Questions use Codex's question card, not Claude Code's own `AskUserQuestion`, which Codex can't show; the bridge turns that tool off when Codex offers a card. The desktop app's `request_user_input_async` only accepts the question, and your answer reaches Claude as your message, attached to a later tool result or starting its next turn. The CLI's `request_user_input` only works in Plan mode, so elsewhere Claude asks in plain text.
-- A message you send while a tool runs is added to that tool's result. So is one sent after stopping the turn, if Codex returned the results.
+- A message you send while a tool runs is added to that tool's result, including base64 image attachments. Full-history replays retain messages before or after the result, using the pending call's marker as the boundary; earlier messages are not sent again. So is a message sent after stopping the turn, if Codex returned the results. Image URLs in this MCP continuation appear as URLs rather than image pixels because MCP image blocks require base64 data.
 - If a new message arrives on the task without those results, the bridge stops the waiting Claude process. It then resumes the session normally, and the unanswered call and anything Codex recorded appear as context.
 - Claude subprocesses receive the current Codex chat's UUID as `CODEX_THREAD_ID`, including during compaction. Local helpers can use it to locate the right chat. When the request has no valid chat UUID, the bridge removes any inherited value rather than borrowing its launcher's identity.
 
@@ -136,7 +136,7 @@ Switch freely. Switching doesn't make Codex compact the chat.
 
 | Switch | What the next model sees |
 |---|---|
-| GPT → Claude, first time in a chat | A new Claude session with the chat so far as text: your messages, GPT's replies, and GPT's commands with their output (each output cut to 2,000 characters). Only the latest 60,000 characters are passed. GPT's reasoning is encrypted by OpenAI, so Claude never sees it. |
+| GPT → Claude, first time in a chat | A new Claude session with the chat so far as text: your messages, GPT's replies, and GPT's commands with their output (each output cut to 2,000 characters). Only the latest 60,000 text characters are passed. Earlier user and tool-result images are also passed as image blocks, labelled as history. GPT's reasoning is encrypted by OpenAI, so Claude never sees it. |
 | Back to Claude later | Claude resumes its own session and gets only what happened since its last reply. |
 | Claude → GPT | Claude's replies, as normal assistant messages. Not Claude's thinking or tool steps. Claude's file changes are on disk, so GPT can read them. |
 | You edit an earlier message | Claude starts a new session from the chat as it now looks. |
@@ -157,11 +157,21 @@ For long chats, stick mainly to one model and switch for second opinions.
 
 ### Cost and caching
 
-- Each model uses its own account: Claude your Claude login, GPT your ChatGPT login. Switching doesn't bill anything twice.
-- The first Claude message in a chat costs the most. Claude Code's system prompt, your AGENTS.md, the skills list and the pasted chat are all new.
-- Every later message continues the same Claude Code session. Each message starts a new `claude` process, but Anthropic's prompt cache is on the server, so the earlier conversation is read from the cache. For example, a follow-up in a chat of about 100k tokens, sent 6 minutes after the last reply, read about 99k tokens from the cache and only added about 4k new ones.
-- If a chat sits idle long enough for the cache to expire, the next message caches the history again, once.
-- Switching back to GPT only adds Claude's replies as new input. OpenAI's prompt cache can still cover the earlier part of the chat.
+- Each model uses its own account: Claude your Claude login, GPT your ChatGPT login. A model switch can make the next provider process the transferred context under that account's allowance.
+- A fresh Claude session often has the largest uncached input: Claude Code's setup, your AGENTS.md, the skills list and transferred chat. Shared prefixes can already be cached, and later compaction or setting changes can also create fresh cache writes, so the first message is not always the most expensive.
+- Normal follow-ups resume the same Claude Code session. A new `claude` process does not imply a fresh conversation or cache miss; the provider caches matching prompt prefixes on its server. Cache hits depend on an unchanged prefix and an unexpired entry, and changing models, tools or reasoning settings can reduce reuse. Claude Code manages this cache; the bridge does not force a new model session for ordinary follow-ups or cache generated answers.
+- Check the native Claude transcript's `usage.cache_read_input_tokens`, `cache_creation_input_tokens` and `input_tokens` to see actual reuse. Count each assistant message ID once because a streamed message can be recorded in several parts. This measures cached input, not a subscription discount or a guarantee for future turns.
+- OpenAI can reuse a cached prefix when switching back to GPT, but Claude's replies and Codex tool calls/results are new input, and Claude's private native-tool history stays in Claude Code.
+
+[Anthropic's prompt-caching documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) explains that caching reuses processed input and does not change output generation.
+
+### Checking transport and model quality
+
+A healthy `/health` response only proves the service is up. Correlate the selected model and effort in the bridge log with the native Claude transcript; inspect the delivered user messages and tool results when an instruction or screenshot appears missing. Repeated `resume=…` lines and real cache-read counters establish continuity and reuse. They do not prove the model followed every instruction.
+
+The bridge keeps Claude Code's own agent and selectively transfers Codex context, instructions and tools. It does not forward Codex's entire base/system prompt wholesale or make the two harnesses identical. Long text history and individual historical tool outputs have the limits described above; genuine OpenAI encrypted context cannot be read by Claude, and Claude's compaction marker cannot provide its private summary to GPT. These boundaries can change what the next model knows, even when its selected model and reasoning effort are correct.
+
+`SendMessage {"to":"…","summary":"…"}` in Claude's tool summaries is Claude Code messaging one of its native agents. It is different from Codex's cross-chat messaging tool; the opaque recipient is an internal agent ID. Inspect the matching native tool call to find its task and actual message rather than guessing from the truncated summary.
 
 ## Configuration
 
