@@ -233,8 +233,9 @@ export function createBridge(config = loadConfig(), state = new State()) {
     const threadId = String(req.headers['thread-id'] || req.headers['session-id'] || body.prompt_cache_key || '') || null;
     parsed.threadId = threadId;
     parsed.codexTurnId = String(req.headers['turn-id'] || req.headers['x-codex-turn-id'] || crypto.randomUUID());
-    const owner = parsed.resume ? state.ownerThread(parsed.resume.sid) : null;
-    parsed.fork = Boolean(parsed.resume && owner && threadId && owner !== threadId);
+    const owner = parsed.marker ? state.ownerThread(parsed.marker.sid) : null;
+    const differentSessionOwner = Boolean(owner && threadId && owner !== threadId); // Compaction also uses inherited markers that are no longer the parent's latest turn.
+    parsed.fork = Boolean(parsed.resume && differentSessionOwner);
     const stream = new ResponsesStream(res, { model: body.model });
     stream.begin();
 
@@ -253,8 +254,12 @@ export function createBridge(config = loadConfig(), state = new State()) {
       if (sid) {
         stream.reasoning('**Compacting Claude Code context**');
         const keep = setInterval(() => stream.keepAlive(), config.keepAliveSeconds * 1000);
-        const r = await compactSession({ config, sid, cwd: parsed.cwd, log });
+        const r = await compactSession({ config, sid, cwd: parsed.cwd, log, threadId, fork: differentSessionOwner });
         clearInterval(keep);
+        if (!r.ok) {
+          stream.fail(r.error); // A failed compaction must not replace Codex's history or claim the parent's session.
+          return;
+        }
         newSid = r.sessionId;
       }
       const turnId = rid('t');

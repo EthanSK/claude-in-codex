@@ -20,6 +20,7 @@ const BRIDGE_NOTE = [
   'You are running inside the Codex desktop app through a local bridge; the user picked you in Codex\'s model picker.',
   'The user sees your text replies and a one-line summary of each tool you use; they do not see raw tool output.',
   'Codex renders Markdown. Refer to files by path relative to the working directory.',
+  'The bridge starts one Claude Code process per turn and closes it when you finish. Your native Agent background tasks do not survive that exit: use native agents in the foreground and wait for them before ending your turn.',
 ].join('\n');
 
 // Without Codex's question tool (older Codex, or a request that does not offer it), questions have to be plain text.
@@ -29,6 +30,7 @@ const CODEX_TOOLS_NOTE = [
   `Tools named \`mcp__${CODEX_TOOLS_SERVER}__*\` are the Codex app's own tools, the same ones Codex gives GPT. Codex runs them itself, shows them in its UI and applies its own approvals.`,
   'Use them for abilities only Codex has, such as the task and app tools inside `exec` (filter `ALL_TOOLS` there to find them), Computer Use and the in-app browser, Codex sub-agents, and asking the user questions when that tool is offered.',
   'Prefer your built-in tools for ordinary file and shell work.',
+  'For agents that must keep working after your turn ends, use the offered Codex collaboration tools, not native Agent background tasks. Follow the user\'s delegation and messaging instructions.',
 ].join('\n');
 
 /**
@@ -100,6 +102,13 @@ export function permissionArgs(mode) {
   return ['--permission-mode', mode];
 }
 
+function claudeEnvironment(threadId) {
+  const env = { ...process.env, CODEX_CLAUDE_BRIDGE: '1' };
+  delete env.CODEX_THREAD_ID; // An isolated bridge can inherit its launcher's chat ID; never give that unrelated identity to a request.
+  if (typeof threadId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) env.CODEX_THREAD_ID = threadId;
+  return env;
+}
+
 /**
  * Runs one Claude Code turn and streams it into Codex.
  * @returns {Promise<void>}
@@ -166,7 +175,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       .join('\n\n');
     args.push('--append-system-prompt', system);
     const mcpConfig = { mcpServers: {} };
-    const env = { ...process.env, CODEX_CLAUDE_BRIDGE: '1' };
+    const env = claudeEnvironment(parsed.threadId);
     // Calls Claude makes to Codex's tools; each waits here until Codex returns its result.
     const queuedCodexCalls = [];
     let codexToolServer = null;
@@ -508,12 +517,13 @@ export function handleEvent(ev, ctx, stream) {
 }
 
 /** Runs Claude Code's /compact on a session (used when Codex asks to compact a Claude thread). */
-export async function compactSession({ config, sid, cwd, log }) {
-  const args = ['-p', '--resume', sid, '--output-format', 'json', '/compact'];
+export async function compactSession({ config, sid, cwd, log, threadId, fork = false }) {
+  const args = ['-p', '--resume', sid, ...(fork ? ['--fork-session'] : []), '--output-format', 'json', '/compact']; // Side chats can compact before their first ordinary turn; fork here too or the parent session is changed and reassigned.
   return new Promise((resolve) => {
     // stdin must be closed: `claude -p` waits for piped stdin otherwise.
     const child = spawn(config.claudePath, args, {
       cwd: cwd && fs.existsSync(cwd) ? cwd : os.homedir(),
+      env: claudeEnvironment(threadId),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -523,14 +533,17 @@ export async function compactSession({ config, sid, cwd, log }) {
     const timer = setTimeout(() => child.kill('SIGTERM'), 10 * 60 * 1000);
     const done = (code) => {
       clearTimeout(timer);
-      if (code !== 0) log.error(`compact failed for ${sid} (code ${code}): ${stderr.trim().slice(-500)}`);
-      let sessionId = sid;
+      let result;
       try {
-        sessionId = JSON.parse(stdout).session_id || sid;
+        result = JSON.parse(stdout);
       } catch {
-        // keep old id
+        // Missing or malformed output cannot confirm that compaction completed.
       }
-      resolve({ ok: code === 0, sessionId });
+      const sessionId = result?.session_id;
+      const ok = code === 0 && !result?.is_error && typeof sessionId === 'string' && sessionId.length > 0 && (!fork || sessionId !== sid); // Never fall back to the parent ID after a failed fork; that would recreate the ownership bug.
+      const error = ok ? null : result?.result || result?.errors?.join?.('\n') || lastLines(stderr) || `claude exited with code ${code}`;
+      if (!ok) log.error(`compact failed for ${sid} (code ${code}): ${error}`);
+      resolve({ ok, sessionId: ok ? sessionId : null, error });
     };
     child.on('error', () => done(-1));
     child.on('close', done);

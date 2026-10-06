@@ -17,10 +17,22 @@ process.stdin.on('data', (d) => (stdin += d));
 process.stdin.on('end', () => {
   const resumeIdx = args.indexOf('--resume');
   const sid = resumeIdx >= 0 && !args.includes('--fork-session') ? args[resumeIdx + 1] : crypto.randomUUID();
-  if (log) fs.appendFileSync(log, JSON.stringify({ args, stdin, cwd: process.cwd() }) + '\n');
+  if (log) fs.appendFileSync(log, JSON.stringify({ args, stdin, cwd: process.cwd(), threadId: process.env.CODEX_THREAD_ID ?? null }) + '\n');
   const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 
   if (args.includes('/compact')) {
+    if (process.env.FAKE_CLAUDE_SCENARIO === 'compact-invalid') {
+      out({ type: 'result', is_error: false, session_id: args[resumeIdx + 1] });
+      return;
+    }
+    if (process.env.FAKE_CLAUDE_SCENARIO === 'compact-malformed') {
+      process.stdout.write('not JSON\n');
+      return;
+    }
+    if (process.env.FAKE_CLAUDE_SCENARIO === 'compact-error') {
+      out({ type: 'result', is_error: true, result: 'Compaction failed in fixture', session_id: sid });
+      return;
+    }
     out({ type: 'result', subtype: 'success', is_error: false, result: '', session_id: sid });
     return;
   }

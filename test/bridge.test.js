@@ -865,6 +865,82 @@ test('a new side chat does not wait for its parent\'s running Claude turn', asyn
   }
 });
 
+test('Claude receives the request chat ID on new, resumed, forked and compacted sessions', async () => {
+  const inherited = process.env.CODEX_THREAD_ID;
+  process.env.CODEX_THREAD_ID = crypto.randomUUID();
+  const parentId = crypto.randomUUID();
+  const sideId = crypto.randomUUID();
+  const h = (id) => ({ 'content-type': 'application/json', 'thread-id': id });
+  const input = [envContext(workdir), userMsg('parent task')];
+  try {
+    fs.rmSync(claudeLog, { force: true });
+    const first = await request('/backend-api/codex/responses', { headers: h(parentId), body: responsesBody('claude-opus-5-5', input) });
+    const continued = [...input, ...doneItems(first.data), userMsg('parent continues')];
+    const second = await request('/backend-api/codex/responses', { headers: h(parentId), body: responsesBody('claude-opus-5-5', continued) });
+    await request('/backend-api/codex/responses', { headers: h(sideId), body: responsesBody('claude-opus-5-5', [...continued, ...doneItems(second.data), userMsg('side forks normally')]) });
+    const compactInput = [...continued, ...doneItems(second.data), { type: 'compaction_trigger' }];
+    const compact = await request('/backend-api/codex/responses', { headers: h(sideId), body: responsesBody('claude-opus-5-5', compactInput) });
+    await request('/backend-api/codex/responses', { headers: h(sideId), body: responsesBody('claude-opus-5-5', [envContext(workdir), ...doneItems(compact.data), userMsg('side continues')]) });
+    for (const id of ['', 'not-a-chat-id']) {
+      await request('/backend-api/codex/responses', { headers: h(id), body: responsesBody('claude-opus-5-5', input) });
+    }
+    assert.deepEqual(readClaudeLog().map((call) => call.threadId), [parentId, parentId, sideId, sideId, sideId, null, null]);
+    const firstSystem = readClaudeLog()[0].args[readClaudeLog()[0].args.indexOf('--append-system-prompt') + 1];
+    assert.match(firstSystem, /native Agent background tasks do not survive/);
+  } finally {
+    if (inherited === undefined) delete process.env.CODEX_THREAD_ID;
+    else process.env.CODEX_THREAD_ID = inherited;
+  }
+});
+
+test('side-chat compaction forks even a stale inherited marker and leaves the parent resumable', async () => {
+  fs.rmSync(claudeLog, { force: true });
+  const parentId = crypto.randomUUID();
+  const sideId = crypto.randomUUID();
+  const h = (id) => ({ 'content-type': 'application/json', 'thread-id': id });
+  const input = [envContext(workdir), userMsg('parent context')];
+  const first = await request('/backend-api/codex/responses', { headers: h(parentId), body: responsesBody('claude-opus-5-5', input) });
+  const firstItems = doneItems(first.data);
+  const parentSid = firstItems.at(-1).encrypted_content.split(':')[2];
+  const advanced = [...input, ...firstItems, userMsg('parent advances')];
+  const second = await request('/backend-api/codex/responses', { headers: h(parentId), body: responsesBody('claude-opus-5-5', advanced) });
+  const latestItems = doneItems(second.data);
+  for (const inheritedItems of [firstItems, latestItems]) {
+    const compact = await request('/backend-api/codex/responses', { headers: h(sideId), body: responsesBody('claude-opus-5-5', [...input, ...inheritedItems, { type: 'compaction_trigger' }]) });
+    const item = doneItems(compact.data).find((entry) => entry.type === 'compaction');
+    assert.ok(item);
+    assert.notEqual(item.encrypted_content.split(':')[2], parentSid, 'compaction must not claim the parent session');
+    assert.ok(readClaudeLog().at(-1).args.includes('--fork-session'));
+  }
+  await request('/backend-api/codex/responses', { headers: h(parentId), body: responsesBody('claude-opus-5-5', [...advanced, ...latestItems, userMsg('parent still continues')]) });
+  const last = readClaudeLog().at(-1);
+  assert.equal(last.args[last.args.indexOf('--resume') + 1], parentSid);
+  assert.ok(!last.args.includes('--fork-session'));
+});
+
+test('failed side-chat compaction emits no replacement marker and leaves the parent resumable', async () => {
+  const h = (id) => ({ 'content-type': 'application/json', 'thread-id': id });
+  const parentId = crypto.randomUUID();
+  const input = [envContext(workdir), userMsg('parent context')];
+  const first = await request('/backend-api/codex/responses', { headers: h(parentId), body: responsesBody('claude-opus-5-5', input) });
+  const items = doneItems(first.data);
+  const parentSid = items.at(-1).encrypted_content.split(':')[2];
+  try {
+    for (const scenario of ['compact-error', 'compact-invalid', 'compact-malformed']) {
+      process.env.FAKE_CLAUDE_SCENARIO = scenario;
+      const compact = await request('/backend-api/codex/responses', { headers: h(crypto.randomUUID()), body: responsesBody('claude-opus-5-5', [...input, ...items, { type: 'compaction_trigger' }]) });
+      assert.equal(doneItems(compact.data).filter((item) => item.type === 'compaction').length, 0, scenario);
+      assert.equal(parseSse(compact.data).at(-1).type, 'response.failed', scenario);
+    }
+  } finally {
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+  }
+  await request('/backend-api/codex/responses', { headers: h(parentId), body: responsesBody('claude-opus-5-5', [...input, ...items, userMsg('parent continues')]) });
+  const last = readClaudeLog().at(-1);
+  assert.equal(last.args[last.args.indexOf('--resume') + 1], parentSid);
+  assert.ok(!last.args.includes('--fork-session'));
+});
+
 test('Codex skills catalog is passed to Claude', async () => {
   fs.rmSync(claudeLog, { force: true });
   const dev = {
@@ -925,6 +1001,7 @@ test('Claude calls Codex tools that Codex runs, and the same Claude process cont
     assert.equal(mcpConfig.mcpServers.cua_repl, undefined, 'Codex runs Computer Use itself when it offers it');
     assert.equal(claudeCall.args[claudeCall.args.indexOf('--allowedTools') + 1], 'mcp__codex');
     assert.match(claudeCall.args[claudeCall.args.indexOf('--append-system-prompt') + 1], /Codex app's own tools/);
+    assert.match(claudeCall.args[claudeCall.args.indexOf('--append-system-prompt') + 1], /use the offered Codex collaboration tools/);
     assert.match(claudeCall.args[claudeCall.args.indexOf('--append-system-prompt') + 1], /call `mcp__codex__request_user_input` instead of asking in plain text/);
     assert.equal(claudeCall.args[claudeCall.args.indexOf('--disallowedTools') + 1], 'AskUserQuestion', 'Codex cannot show Claude Code\'s own question tool');
     const listed = codexToolsLog()[0];

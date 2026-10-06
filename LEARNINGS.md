@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-06T21:13:00Z
+**Trigger:** Local notification helpers lacked a Codex chat ID, a parent lost its native Claude context after a side chat, and native background Agent tasks disappeared between turns.
+**Symptom:** Claude children inherited no chat ID (or the bridge launcher's ID). The side-chat incident ended with `/compact` in the parent's Claude transcript, the state index assigning that session to the side chat, and the parent subsequently starting fresh.
+**Root cause:** Only the ordinary runner handled `--fork-session`; compaction ignored ownership and recorded its returned parent session under the requesting side chat. The runner also copied its process environment without setting the request's `CODEX_THREAD_ID`. Native background agents belong to the per-turn Claude process, which exits when the turn ends.
+**Fix:** Fork compaction for another owner, even with a stale inherited marker; accept only successful compaction with a distinct fork ID, and emit no replacement marker on failure. Give ordinary and compaction processes the request's validated chat UUID, clearing inherited IDs when it is absent or invalid. Explain the native-agent lifetime and direct cross-turn work to the existing offered Codex collaboration tools, without adding a persistent-process architecture or overriding delegation instructions.
+**Guard:** The new identity, fork-compaction and compaction-failure regressions failed against the previous source. All 53 tests pass, including malformed compaction output, a returned parent ID, current/stale side-chat markers, parent continuity and new/resumed/forked environments. A real isolated Fable 5.1 test printed the correct parent chat ID through Bash, compacted a side chat into a distinct Claude session without changing the parent state, then proved both chats resumed their own sessions and remembered the original word; the side printed its own chat ID. Guidance for native background agents is not a guarantee of model compliance. Installed verification is separate.
+---
+
+---
 **Date:** 2026-10-06T20:59:30Z
 **Trigger:** The first installed sub-agent check still stopped before its GPT follow-up despite an earlier isolated pass.
 **Symptom:** Both children replied, but Claude said the user had rejected its wait. A captured isolated request showed the bridge session marker immediately followed by the child mailbox item, with the pending `wait_agent` call entirely absent.

@@ -108,6 +108,7 @@ Other details:
 - Questions use Codex's question card, not Claude Code's own `AskUserQuestion`, which Codex can't show; the bridge turns that tool off when Codex offers a card. The desktop app's `request_user_input_async` only accepts the question, and your answer reaches Claude as your message, attached to a later tool result or starting its next turn. The CLI's `request_user_input` only works in Plan mode, so elsewhere Claude asks in plain text.
 - A message you send while a tool runs is added to that tool's result. So is one sent after stopping the turn, if Codex returned the results.
 - If a new message arrives on the task without those results, the bridge stops the waiting Claude process. It then resumes the session normally, and the unanswered call and anything Codex recorded appear as context.
+- Claude subprocesses receive the current Codex chat's UUID as `CODEX_THREAD_ID`, including during compaction. Local helpers can use it to locate the right chat. When the request has no valid chat UUID, the bridge removes any inherited value rather than borrowing its launcher's identity.
 
 **Verified so far (September 2026, Claude Code 2.1.281, Codex CLI 0.155):** in real Opus turns through the Codex CLI, `exec` ran a shell command that Codex itself executed and displayed. Computer Use read desktop and Chrome state. Two Codex calls followed by Claude's own Bash all finished in one Claude process. The desktop app's task tools (pin, rename, messaging) and the in-app browser weren't tested through this path at the time of writing.
 
@@ -116,6 +117,8 @@ Other details:
 ### GPT and Claude sub-agents
 
 Claude can use Codex's `collaboration` tools to spawn GPT or Claude children, receive their replies, and send follow-ups. The bridge declares Claude's collaboration arguments as plaintext with `encrypted_function_args: []`; without that field, Codex treats the message as ciphertext and GPT rejects it with `invalid_encrypted_content`. Native OpenAI encrypted messages remain untouched.
+
+Claude Code's native background `Agent` tasks have a different lifetime: the bridge runs one Claude process per turn, and those background tasks end when that process exits. Claude is told to wait for native foreground agents before finishing, or use the offered Codex collaboration tools for work across turns, subject to the user's delegation instructions. This is guidance, not a guarantee that Claude will always choose the right tool; the bridge does not keep native background agents alive.
 
 Codex delivers tasks and results as `agent_message` items. The bridge passes their readable text to Claude with the sender identified, including messages received while a Codex tool runs. When a child reply preempts `wait_agent`, Codex can omit both the wait call and its result from the next request. The bridge matches the surviving session marker to the pending wait in that same thread, then delivers the actual mailbox message without killing Claude and recording a false user cancellation. Human messages and Stop retain the existing cancellation path; another thread cannot wake the parent’s pending tool.
 
@@ -142,6 +145,8 @@ Switch freely. Switching doesn't make Codex compact the chat.
 ### Compaction
 
 Codex still decides when to compact: automatically, or when you run `/compact`. The bridge reports Claude's real token count and context window, so Codex's context meter is accurate. When Codex compacts a Claude chat, the bridge runs Claude Code's own `/compact` on the Claude session. Claude Code can also compact by itself during a turn ("Compacted context").
+
+A side chat that inherits another chat's Claude session forks it before compaction, including when the inherited marker is older than the parent's latest turn. Older bridge versions compacted and reassigned the parent's session instead, causing the parent to start fresh on its next message. Failed compaction now returns an error without replacing Codex's history with a success marker. Existing sessions affected before the fix are not rewritten.
 
 Compacted history doesn't carry across models:
 
