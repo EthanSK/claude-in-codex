@@ -35,6 +35,15 @@ function textOf(item) {
     .join('\n');
 }
 
+// Keep the sender visible when Claude receives a Codex task, follow-up or result; these are agent messages, not new human instructions.
+export function normalizeAgentMessageForClaude(item) {
+  if (item?.type !== 'agent_message') return item;
+  const text = (item.content || []).map((part) => part.type === 'input_text'
+    ? part.text
+    : '(This part is encrypted by another model and cannot be read by Claude.)').join('\n'); // Never reinterpret real OpenAI ciphertext as plaintext.
+  return { type: 'message', role: 'user', content: [{ type: 'input_text', text: `Codex agent message from ${item.author} to ${item.recipient}:\n${text}` }] };
+}
+
 const CONTEXT_TAG = /^\s*<([a-z][a-z0-9_]*)[\s>]/i;
 
 // Mirrors Codex's own "contextual user fragment" idea: injected context, not typed by the user.
@@ -160,7 +169,7 @@ function isPromptMessage(item) {
  * @param {(sid: string, turnId: string) => boolean} isLatestTurn
  */
 export function parseCodexRequest(body, isLatestTurn = () => false) {
-  const input = Array.isArray(body.input) ? body.input : [];
+  const input = Array.isArray(body.input) ? body.input.map(normalizeAgentMessageForClaude) : [];
   let cwd = null;
   let sandboxMode = null;
   let planMode = false;

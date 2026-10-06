@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { rid } from './responsesStream.js';
-import { classifyUserText } from './codexInput.js';
+import { classifyUserText, normalizeAgentMessageForClaude } from './codexInput.js';
 
 // Claude sees each tool as mcp__codex__<name>.
 export const CODEX_TOOLS_SERVER = 'codex';
@@ -162,10 +162,21 @@ export function findCodexResults(input) {
     lastOutput = index;
     outputs.set(item.call_id, item.output);
   });
+  if (!turn) {
+    const waitIndex = input.findLastIndex((item) => item?.type === 'function_call' && item.namespace === 'collaboration' && item.name === 'wait_agent' && waitingCalls.has(item.call_id));
+    const arrivals = input.slice(waitIndex + 1);
+    const userIntervened = arrivals.some((item) => item?.type === 'message' && item.role === 'user' && item.content?.some((part) => part.type === 'input_image' || (part.type === 'input_text' && ['prompt', 'aborted'].includes(classifyUserText(part.text)))));
+    if (waitIndex >= 0 && arrivals.some((item) => item?.type === 'agent_message') && !userIntervened) { // Codex preempts wait_agent to deliver a mailbox item without a tool result; killing Claude here falsely records a user cancellation.
+      const callId = input[waitIndex].call_id;
+      turn = waitingCalls.get(callId);
+      lastOutput = waitIndex;
+      outputs.set(callId, 'The bridge ended this pending wait because Codex delivered an agent message. Read the attached message; this is not a user cancellation.');
+    }
+  }
   if (!turn) return null;
   // Messages after the results were sent while the tool ran (or after stopping the turn); Codex would show them to GPT too.
   const userText = [];
-  for (const item of input.slice(lastOutput + 1)) {
+  for (const item of input.slice(lastOutput + 1).map(normalizeAgentMessageForClaude)) {
     if (item?.type !== 'message' || item.role !== 'user') continue;
     for (const part of item.content || []) {
       if (part?.type !== 'input_text') continue;

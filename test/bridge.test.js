@@ -935,10 +935,11 @@ test('Claude calls Codex tools that Codex runs, and the same Claude process cont
     assert.ok(Number(listed.toolTimeout) >= 60 * 60 * 1000);
 
     const output = { type: 'function_call_output', call_id: call.call_id, output: [{ type: 'input_text', text: '3 tasks' }, { type: 'input_image', image_url: 'data:image/png;base64,iVBOR' }] };
-    const second = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', [...input1, ...firstItems, output, userMsg('also pin it')], { tools: codexTools }) });
+    const agentReply = { type: 'agent_message', author: '/root/child', recipient: '/root', content: [{ type: 'input_text', text: 'Child result: apricot' }] };
+    const second = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', [...input1, ...firstItems, output, userMsg('also pin it'), agentReply], { tools: codexTools }) });
     const secondEvents = parseSse(second.data);
     const final = doneItems(second.data).find((item) => item.type === 'message');
-    assert.equal(final.content[0].text, 'Codex said: 3 tasks | [image image/png] | The user sent this message while the tool was running:\n\nalso pin it');
+    assert.equal(final.content[0].text, 'Codex said: 3 tasks | [image image/png] | New messages arrived while the tool was running:\n\nalso pin it\n\nCodex agent message from /root/child to /root:\nChild result: apricot');
     assert.equal(final.phase, 'final_answer');
     assert.equal(secondEvents.at(-1).response.end_turn, true);
     assert.equal(readClaudeLog().length, 1, 'no second Claude process');

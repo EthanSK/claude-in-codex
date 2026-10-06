@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-06T20:49:50Z
+**Trigger:** A GPT sub-agent spawned by bridged Claude failed immediately with `invalid_encrypted_content` for an `amsg_` item.
+**Symptom:** The child transcript stored the parent's ordinary task text inside an `encrypted_content` part. The failure also occurred with `fork_turns: none`, so it was not inherited Claude compaction.
+**Root cause:** `ResponsesStream.codexToolCall` omitted `encrypted_function_args`. Codex's collaboration router treats spawn/send/follow-up message arguments as encrypted unless this field is explicitly `[]`. Independently, the bridge did not parse `agent_message` inputs, dropping Claude-child tasks and parent mailbox replies. The first real test exposed a third gap: Codex preempted `wait_agent` for a mailbox delivery without returning a tool result, causing the bridge to kill Claude; Claude Code then recorded a user cancellation and refused the authorized follow-up.
+**Fix:** Declare plaintext only on bridge-generated collaboration message calls; retain agent message content and sender in Claude input and tool continuations; wake a pending `wait_agent` when its actual mailbox delivery arrives without a tool result, preserving human interruption handling and other tool cancellation behavior. Do not strip or reinterpret arbitrary OpenAI ciphertext, and do not convert existing failed child histories based on whether encrypted data looks readable.
+**Guard:** Parser/stream regressions fail against the prior source; tests preserve real GPT ciphertext and exercise explicit Stop, human prompts/images, and unrelated pending tools. All 49 tests pass. A real isolated Opus 5.5 parent spawned GPT-6.1 Sol and Fable 5.1, received `GPT_CHILD_OK` and `CLAUDE_CHILD_OK`, and completed a GPT follow-up returning its remembered `GPT_CHILD_OK`, without a false cancellation. Installation is tracked separately from isolated acceptance.
+---
+
+---
 **Date:** 2026-10-06T19:22:57Z
 **Trigger:** Fable said pasted Agent Flow prompts contained no new request and continued implementation despite a request to answer first.
 **Symptom:** The reported paste reached Claude verbatim, and its file-read results contained both complete canonical prompts, including the instruction not to implement yet. A separate parser reproduction exposed XML-authored requests becoming historical context plus `(continue)`.

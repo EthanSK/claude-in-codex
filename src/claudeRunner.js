@@ -300,7 +300,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
           const content = outputs.has(call.callId)
             ? codexOutputToMcp(outputs.get(call.callId))
             : [{ type: 'text', text: 'Codex returned no result for this tool call.' }];
-          if (userText && index === calls.length - 1) content.push({ type: 'text', text: `The user sent this message while the tool was running:\n\n${userText}` });
+          if (userText && index === calls.length - 1) content.push({ type: 'text', text: `New messages arrived while the tool was running:\n\n${userText}` }); // Includes Codex agent messages; do not attribute another agent's instructions to the user.
           call.reply(content);
         });
         for (const ev of heldEvents.splice(0)) handle(ev);

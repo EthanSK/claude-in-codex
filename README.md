@@ -113,6 +113,14 @@ Other details:
 
 **History:** a September 2026 prototype that connected Claude straight to the desktop app-tools server was rejected by the app's native-pipe peer check, and was removed. Don't disable that check to work around this.
 
+### GPT and Claude sub-agents
+
+Claude can use Codex's `collaboration` tools to spawn GPT or Claude children, receive their replies, and send follow-ups. The bridge declares Claude's collaboration arguments as plaintext with `encrypted_function_args: []`; without that field, Codex treats the message as ciphertext and GPT rejects it with `invalid_encrypted_content`. Native OpenAI encrypted messages remain untouched.
+
+Codex delivers tasks and results as `agent_message` items. The bridge passes their readable text to Claude with the sender identified, including messages received while a Codex tool runs. When a child reply preempts `wait_agent` without a tool result, the bridge wakes the pending wait with the actual mailbox message rather than killing Claude and recording a false user cancellation. Human messages and Stop retain the existing cancellation path.
+
+Verified on October 6, 2026 with the installed Codex binary against an isolated bridge: an Opus 5.5 parent spawned GPT-6.1 Sol and Fable 5.1 children, received both expected replies, then continued the GPT child and verified its previous reply. This does not repair already-recorded malformed encrypted items in failed children; spawn a fresh child after updating. Claude still cannot decrypt genuinely encrypted OpenAI content.
+
 ### Pasted text and Agent Flow messages
 
 Agent Flow's speech and typed-text wrappers remain the current user request. When selected text precedes a request in the same message, the bridge preserves both verbatim, including the quotation boundaries. A selection-only block remains context. Older bridge versions treated these complete XML-led messages as earlier context and could substitute `(continue)` for the current request.

@@ -1,8 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildClaudeUserMessage, classifyUserText, makeMarker, parseCodexRequest } from '../src/codexInput.js';
+import { buildClaudeUserMessage, classifyUserText, makeMarker, parseCodexRequest, sanitizeInputForOpenAI } from '../src/codexInput.js';
 
 const userMessage = (text) => ({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] });
+
+test('Codex agent tasks and follow-ups reach Claude on new and resumed turns', () => {
+  for (const resumed of [false, true]) {
+    const message = { type: 'agent_message', id: 'amsg_1', author: '/root', recipient: '/root/child', content: [{ type: 'input_text', text: 'Message Type: NEW_TASK\nPayload:\nRemember apricot.' }] };
+    const marker = { type: 'reasoning', encrypted_content: makeMarker('session', 'turn') };
+    const parsed = parseCodexRequest({ input: resumed ? [userMessage('Earlier work'), marker, message] : [message] }, () => resumed);
+    assert.equal(parsed.promptText, 'Codex agent message from /root to /root/child:\nMessage Type: NEW_TASK\nPayload:\nRemember apricot.');
+    assert.equal(parsed.context, '');
+    assert.equal(buildClaudeUserMessage(parsed, { newSession: !resumed }).message.content[0].text, parsed.promptText);
+  }
+});
+
+test('Claude sees earlier agent replies as context but never reads OpenAI ciphertext', () => {
+  const message = { type: 'agent_message', id: 'amsg_1', author: '/root/child', recipient: '/root', content: [{ type: 'input_text', text: 'Child result: apricot' }, { type: 'encrypted_content', encrypted_content: 'opaque-openai-value' }] };
+  const parsed = parseCodexRequest({ input: [message, { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Acknowledged.' }] }, userMessage('What was the result?')] });
+  assert.match(parsed.context, /Child result: apricot/);
+  assert.match(parsed.context, /encrypted by another model/);
+  assert.doesNotMatch(parsed.context, /opaque-openai-value/);
+  const untouched = sanitizeInputForOpenAI([message]);
+  assert.equal(untouched.changed, false, 'genuine OpenAI encrypted agent messages must remain untouched for GPT');
+  assert.equal(untouched.input[0], message);
+});
 
 test('Agent Flow authored wrappers stay current prompts on new and resumed turns', () => {
   for (const tag of ['speech', 'speech_segment', 'typed_text', 'potential_tts', 'agent_flow_context']) {

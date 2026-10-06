@@ -143,6 +143,9 @@ export class ResponsesStream {
     const item = entry.custom
       ? { id: rid('ctc_ccb_'), type: 'custom_tool_call', status: 'completed', call_id: callId, name: entry.name, input: String(args.input ?? '') }
       : { id: rid('fc_ccb_'), type: 'function_call', call_id: callId, name: entry.name, ...(entry.namespace ? { namespace: entry.namespace } : {}), arguments: JSON.stringify(args) };
+    if (!entry.custom && entry.namespace === 'collaboration' && ['spawn_agent', 'send_message', 'followup_task'].includes(entry.name)) {
+      item.encrypted_function_args = []; // Codex treats an omitted field as encrypted collaboration text; Claude supplies plaintext, so declare it before Codex delivers the message.
+    }
     this.send('response.output_item.added', { output_index: this.outputIndex, item });
     this.send('response.output_item.done', { output_index: this.outputIndex, item });
     this.output.push(item);
