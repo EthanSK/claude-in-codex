@@ -30,6 +30,7 @@ Each entry looks like:
 **Root cause:** The reported incident was an instruction-following failure after successful delivery and reading. Independently, `classifyUserText` treated complete XML-root text as context, including speech and typed-text wrappers or selections followed by a current request.
 **Fix:** Commit `631b83d` keeps authored wrappers and requests following context blocks as current prompts, preserving their original quotation boundaries. Pasted-file references with an empty `My request` heading already worked; compare actual Claude input and file-read results before attributing a model's claim to lost transport.
 **Guard:** All 44 tests passed using a fake Claude runner, including Fable new/resumed-turn input equality; three new parser regressions fail against the previous source. Tests cover a long selection, attachment-reference messages and unchanged injected-metadata handling. These checks establish transport behavior, not model obedience; installation requires a separate verified service reload.
+**Installed verification:** The service restarted at 2026-10-06T19:31:57Z after the user authorized making the fix live. Health passed and GPT WebSockets reconnected. Two real Fable 5.1 requests, one speech-wrapped and one selection-led follow-up, returned the expected token in the same Claude session; its transcript contained both prompts verbatim as current user messages, with no tool calls. This verifies those live message shapes, not arbitrary future instruction-following.
 ---
 
 ---
