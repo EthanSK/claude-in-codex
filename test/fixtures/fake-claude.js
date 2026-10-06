@@ -17,10 +17,18 @@ process.stdin.on('data', (d) => (stdin += d));
 process.stdin.on('end', () => {
   const resumeIdx = args.indexOf('--resume');
   const sid = resumeIdx >= 0 && !args.includes('--fork-session') ? args[resumeIdx + 1] : crypto.randomUUID();
-  if (log) fs.appendFileSync(log, JSON.stringify({ args, stdin, cwd: process.cwd(), threadId: process.env.CODEX_THREAD_ID ?? null }) + '\n');
+  if (log) fs.appendFileSync(log, JSON.stringify({ args, stdin, cwd: process.cwd(), threadId: process.env.CODEX_THREAD_ID ?? null, pid: process.pid }) + '\n');
   const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 
   if (args.includes('/compact')) {
+    if (process.env.FAKE_CLAUDE_SCENARIO === 'hold-compact') {
+      const waiting = setInterval(() => {
+        if (!fs.existsSync(process.env.FAKE_CLAUDE_HOLD_FILE)) return;
+        clearInterval(waiting);
+        out({ type: 'result', is_error: false, session_id: sid });
+      }, 20);
+      return;
+    }
     if (process.env.FAKE_CLAUDE_SCENARIO === 'compact-invalid') {
       out({ type: 'result', is_error: false, session_id: args[resumeIdx + 1] });
       return;
@@ -39,6 +47,14 @@ process.stdin.on('end', () => {
 
   const scenario = process.env.FAKE_CLAUDE_SCENARIO || 'tools';
   out({ type: 'system', subtype: 'init', session_id: sid, model: 'fake' });
+  if (scenario === 'hold-native') {
+    const waiting = setInterval(() => {
+      if (!fs.existsSync(process.env.FAKE_CLAUDE_HOLD_FILE)) return;
+      clearInterval(waiting);
+      out({ type: 'result', subtype: 'success', is_error: false, session_id: sid, result: 'Released.' });
+    }, 20);
+    return;
+  }
   const msg1 = 'msg_1';
   out({ type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: { type: 'message_start', message: { id: msg1 } } });
   out({ type: 'stream_event', session_id: sid, parent_tool_use_id: null, event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } } });

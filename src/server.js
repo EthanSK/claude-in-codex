@@ -11,7 +11,7 @@ import { loadConfig, BASE_PATH, BRIDGE_HOME } from './config.js';
 import { State } from './state.js';
 import { parseCodexRequest, buildClaudeUserMessage, sanitizeInputForOpenAI, makeMarker } from './codexInput.js';
 import { ResponsesStream, usageObject, rid } from './responsesStream.js';
-import { runClaudeTurn, compactSession, claudeCapabilities } from './claudeRunner.js';
+import { runClaudeTurn, compactSession, claudeCapabilities, hasActiveClaudeTurns } from './claudeRunner.js';
 import { mergeCatalog, fallbackGptModel } from './catalog.js';
 import { findCodexResults, cancelWaitingCodexTurns } from './codexTools.js';
 
@@ -308,6 +308,13 @@ export function createBridge(config = loadConfig(), state = new State()) {
     socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   }
 
+  function watchClientWebSocket(client) {
+    client.on('error', (error) => {
+      log.error(`client websocket failed: ${error.message}`);
+      client.terminate(); // A malformed client frame emits an error; close that client rather than crashing every chat in the bridge.
+    });
+  }
+
   function routeWebSocketMessage(req, client, data, isBinary, forwardGpt) {
     let body;
     try { body = isBinary ? null : JSON.parse(data.toString()); } catch { body = null; }
@@ -367,6 +374,10 @@ export function createBridge(config = loadConfig(), state = new State()) {
   }
 
   function proxyWebSocket(req, socket, head) {
+    socket.on('error', (error) => {
+      log.error(`websocket connection failed: ${error.message}`);
+      socket.destroy(); // A client can disconnect during a rejected upgrade; the October 2 EPIPE otherwise killed the whole bridge.
+    });
     const denied = localOnly(req);
     if (denied) return rejectWebSocket(socket, '403 Forbidden');
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -381,6 +392,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
       // Open GPT lazily if a frame on this socket needs it.
       const wss = new WebSocketServer({ noServer: true, perMessageDeflate: true });
       wss.handleUpgrade(req, socket, head, (client) => {
+        watchClientWebSocket(client);
         log.info(`local routed websocket model=${model || 'unhinted'}`);
         let upstream;
         const pendingGpt = [];
@@ -438,6 +450,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
       });
       wss.handleUpgrade(req, socket, head, (connectedClient) => {
         client = connectedClient;
+        watchClientWebSocket(client);
         log.info(`proxied GPT websocket model=${model}`);
         socket.resume();
         client.on('message', (data, isBinary) => routeWebSocketMessage(req, client, data, isBinary, (message, binary) => upstream.send(message, { binary })));
@@ -564,18 +577,21 @@ if (isMain) {
   // Reload after code updates: exit once idle and let launchd restart us with the new code.
   let active = 0;
   let reloadPending = false;
+  const restartIfIdle = () => {
+    if (active === 0 && !hasActiveClaudeTurns()) process.exit(0); // Codex tool handoffs end the HTTP response while the same Claude turn is still waiting for its result.
+  };
   server.on('request', (req, res) => {
     active++;
     res.on('close', () => {
       active--;
-      if (reloadPending && active === 0) process.exit(0);
+      if (reloadPending) restartIfIdle();
     });
   });
   server.on('upgrade', (_req, socket) => {
     active++;
     socket.on('close', () => {
       active--;
-      if (reloadPending && active === 0) process.exit(0);
+      if (reloadPending) restartIfIdle();
     });
   });
   const srcDir = path.dirname(fs.realpathSync(new URL(import.meta.url).pathname));
@@ -584,7 +600,7 @@ if (isMain) {
       if (!file || !file.endsWith('.js') || reloadPending) return;
       reloadPending = true;
       log.info(`${file} changed; restarting when idle`);
-      setTimeout(() => active === 0 && process.exit(0), 500);
+      setInterval(restartIfIdle, 500); // A native turn can finish after its response closes, so retry the pending idle reload without interrupting it.
     });
   } catch (err) {
     log.error(`could not watch ${srcDir}: ${err.message}`);

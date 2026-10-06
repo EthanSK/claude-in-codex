@@ -866,6 +866,42 @@ test('a new side chat does not wait for its parent\'s running Claude turn', asyn
   }
 });
 
+test('a stopped queued request never starts a Claude process after the running turn finishes', { timeout: 5000 }, async () => {
+  const headers = { 'content-type': 'application/json', 'thread-id': 'queued-stop' };
+  const releaseFile = path.join(tmp, 'release-native-turn');
+  fs.rmSync(claudeLog, { force: true });
+  fs.rmSync(releaseFile, { force: true });
+  const input = [envContext(workdir), userMsg('seed')];
+  const seed = await request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', input) });
+  const history = [...input, ...doneItems(seed.data)];
+  process.env.FAKE_CLAUDE_SCENARIO = 'hold-native';
+  process.env.FAKE_CLAUDE_HOLD_FILE = releaseFile;
+  const running = request('/backend-api/codex/responses', { headers, body: responsesBody('claude-opus-5-5', [...history, userMsg('long command')]) });
+  try {
+    const deadline = Date.now() + 2000;
+    while (readClaudeLog().length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(readClaudeLog().length, 2, 'the resumed native command must already be running');
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+    await new Promise((resolve) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/backend-api/codex/responses', method: 'POST', headers }, (res) => {
+        res.once('close', resolve);
+        res.once('data', () => req.destroy()); // Stop the queued Codex response while the first native turn still holds the session.
+      });
+      req.on('error', () => {});
+      req.end(responsesBody('claude-opus-5-5', [...history, userMsg('never execute this stopped request')]));
+    });
+    fs.writeFileSync(releaseFile, 'finish');
+    await running;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(readClaudeLog().length, 2, 'a disconnected queued request must not consume another model turn or execute tools');
+  } finally {
+    fs.writeFileSync(releaseFile, 'finish');
+    await running;
+    delete process.env.FAKE_CLAUDE_SCENARIO;
+    delete process.env.FAKE_CLAUDE_HOLD_FILE;
+  }
+});
+
 test('Claude receives the request chat ID on new, resumed, forked and compacted sessions', async () => {
   const inherited = process.env.CODEX_THREAD_ID;
   process.env.CODEX_THREAD_ID = crypto.randomUUID();
@@ -1022,6 +1058,7 @@ test('Claude calls Codex tools that Codex runs, and the same Claude process cont
     assert.equal(final.phase, 'final_answer');
     assert.equal(secondEvents.at(-1).response.end_turn, true);
     assert.equal(readClaudeLog().length, 1, 'no second Claude process');
+    assert.equal(mcpConfig.mcpServers.codex.timeout, 24 * 60 * 60 * 1000, 'Codex waits must also override Claude Code\'s independent 30-minute idle timeout');
   } finally {
     delete process.env.FAKE_CLAUDE_SCENARIO;
   }

@@ -81,6 +81,13 @@ export async function claudeCapabilities(claudePath) {
 
 // Serialize turns per Claude session so two requests never resume the same session at once.
 const sessionLocks = new Map();
+let activeCompactions = 0;
+
+/** Whether native Claude work still needs this bridge, including waits between Codex responses. */
+export function hasActiveClaudeTurns() {
+  return sessionLocks.size > 0 || activeCompactions > 0;
+}
+
 async function withSessionLock(key, fn) {
   const prev = sessionLocks.get(key) || Promise.resolve();
   let release;
@@ -145,6 +152,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
   const lockKey = parsed.resume && !parsed.fork ? parsed.resume.sid : rid(parsed.fork ? 'fork_' : 'new_');
   if (sessionLocks.has(lockKey)) log.info(`claude session ${lockKey} is busy; this turn waits for the running one`); // The "claude turn" line only appears once the wait ends.
   await withSessionLock(lockKey, async () => {
+    if (stream.res.destroyed || stream.res.writableEnded) return; // A request stopped while queued must not start a paid turn or run tools after the previous turn releases this session.
     const args = [
       '-p',
       '--input-format',
@@ -188,6 +196,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
         command: process.execPath,
         args: [fileURLToPath(new URL('./codexToolsMcpProxy.js', import.meta.url))],
         env: { CODEX_CLAUDE_BRIDGE_TOOLS_SOCKET: await codexToolServer.listen() },
+        timeout: CODEX_TOOL_TIMEOUT_MS, // Claude Code's separate 30-minute stdio idle timeout otherwise aborts silent Codex waits despite MCP_TOOL_TIMEOUT.
       };
       // Codex runs its tools under its own approval policy, so Claude should not block them too. Plan mode keeps Claude's read-only rules.
       if (permissionMode !== 'plan') args.push('--allowedTools', `mcp__${CODEX_TOOLS_SERVER}`);
@@ -529,6 +538,8 @@ export async function compactSession({ config, sid, cwd, log, threadId, fork = f
       env: claudeEnvironment(threadId),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    activeCompactions++;
+    child.once('close', () => { activeCompactions--; }); // A disconnected HTTP client can leave compaction running; reload must wait for that native process too.
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d));

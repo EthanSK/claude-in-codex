@@ -118,7 +118,12 @@ say "bridge healthy on http://127.0.0.1:$PORT"
 # --- Codex config ------------------------------------------------------------------
 mkdir -p "$(dirname "$CODEX_CONFIG")"
 touch "$CODEX_CONFIG"
-if grep -q "$TAG" "$CODEX_CONFIG"; then
+if grep -Eq '^[[:space:]]*openai_base_url[[:space:]]*=.*# codex-claude-bridge' "$CODEX_CONFIG"; then
+  "$NODE" -e '
+    const fs=require("fs"), file=process.argv[1], url=process.argv[2], text=fs.readFileSync(file,"utf8");
+    const updated=text.replace(/^[\t ]*openai_base_url[\t ]*=[^\r\n]*# codex-claude-bridge[^\r\n]*$/m, `openai_base_url = ${JSON.stringify(url)} # codex-claude-bridge`);
+    if(updated!==text) { fs.copyFileSync(file, `${file}.bak-ccb-${Date.now()}`); fs.writeFileSync(file,updated); }
+  ' "$CODEX_CONFIG" "http://127.0.0.1:$PORT/backend-api/codex" # Reinstalling on another port must move the existing managed route too; preserve unowned settings.
   say "Codex already points at the bridge"
 else
   if grep -Eq '^[[:space:]]*openai_base_url[[:space:]]*=' "$CODEX_CONFIG"; then

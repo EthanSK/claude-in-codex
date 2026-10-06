@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-06T22:00:00Z
+**Trigger:** Ethan requested a historical sweep of previous bridge sessions, Codex logs and native Claude transcripts, with fixes for missed failures.
+**Symptom:** The October 2 bridge log contains an unhandled `write EPIPE` crash in WebSocket rejection. An October 4 native Codex tool call was aborted after 1,803 silent seconds despite the intended 24-hour timeout. Isolated probes additionally reproduced a malformed-frame crash, a stopped queued request starting later, an idle source reload during a waiting Claude turn or disconnected compaction, a stale route after changing the installation port, and a failed uninstall of a one-line config.
+**Root cause:** Client TCP/WebSocket errors had no listeners. Claude Code's separate stdio idle timeout was not overridden by `MCP_TOOL_TIMEOUT`. Queued requests checked disconnection only after spawning. The watcher counted HTTP/WebSocket lifetimes but not native work between responses. Installation treated an already-managed route as immutable; uninstall used `grep -v`, whose empty-result exit status skipped the replacement.
+**Fix:** Contain client connection errors, set the Codex MCP server's existing 24-hour timeout explicitly, skip closed queued responses before spawning, wait for session locks and native compaction before reloading, update only the bridge-managed route on port changes, and remove tagged config lines with an empty-result-safe filter. A pending watcher checks again after native work finishes. Persistent GPT sockets still delay reload; no forced restart, paid-turn retry or prompt/history rewrite was added.
+**Guard:** Nine focused regression cases fail against the previous production source, and all 63 current tests pass. They exercise raw client frames on GPT and unhinted routes, queued cancellation, tool handoff configuration, actual isolated source watching during native waits and disconnected compaction, and installer scripts with fake service commands. A real isolated Claude Code 2.1.292 / Fable 5.1 session received the expected delayed MCP result after a 36-second hold with a deliberately shortened 1-second idle setting; the native transcript confirms the selected model, successful tool result and same-session continuation. This verifies the override, not a 24-hour wait or a desktop app tool that never replies. Installed verification remains separate.
+---
+
+---
 **Date:** 2026-10-06T21:30:00Z
 **Trigger:** Ethan asked whether recent bridge use was efficient and preserved model quality, and what a native SendMessage summary meant.
 **Symptom:** Reproduction found that a user screenshot arriving during a Codex tool continuation lost its pixels, and a message before the tool result lost its text too. A model-switch replay also reduced historical user/tool-result images to text placeholders.

@@ -12,7 +12,7 @@ echo "==> service removed"
 
 if [ -f "$CODEX_CONFIG" ] && grep -q "$TAG" "$CODEX_CONFIG"; then
   cp "$CODEX_CONFIG" "$CODEX_CONFIG.bak-ccb-uninstall-$(date +%Y%m%d-%H%M%S)"
-  grep -v "$TAG" "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG"
+  sed "/$TAG/d" "$CODEX_CONFIG" > "$CODEX_CONFIG.tmp" && mv "$CODEX_CONFIG.tmp" "$CODEX_CONFIG" # grep -v exits 1 on an empty result, which left the sole bridge route behind after uninstall.
   echo "==> removed bridge lines from ~/.codex/config.toml"
 fi
 echo "==> Done. Restart the Codex app. (~/.codex-claude-bridge is left in place.)"
