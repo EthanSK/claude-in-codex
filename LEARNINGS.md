@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-08T18:20:00Z
+**Trigger:** A GPT side chat failed to send an authorized follow-up to its main chat with `sendRequest.bind is not a function`.
+**Symptom:** Reading chats worked, but sending failed before delivery. The Claude bridge was healthy, and a separate upstream report records the same failure (openai/codex #51790).
+**Root cause:** Codex desktop 26.1002.52244's renderer parent lookup receives an AppServerManager RPC stub, then passes `t.sendRequest.bind(t)` to its opening-item reader. Cap'n Web treats this as a remote `sendRequest.bind` call; JavaScript function prototype methods are not exposed there. The exact function extracted from the installed app reproduces the reported error with a real Cap'n Web 0.11.1 `RpcStub`.
+**Fix:** A local candidate replaces only that binding with `(...e)=>t.sendRequest(...e)`. The bridge's source and service do not own this callback and cannot repair it through a reload. The candidate is not an installed or signed desktop repair; do not ship it as a bridge fix or claim native delivery passed.
+**Guard:** The original installed lookup fails with the exact error, while the corrected lookup resolves its parent and preserves arguments/options. Additional cases cover paginated compaction, tool-output opening items, empty/no-parent history, repeated-cursor rejection and cached history. Electron's ASAR reader verifies all 20,899 packed files are unchanged except this callback; renderer syntax and archive/manifest hashes pass. This establishes a bounded candidate, not desktop startup, signing, Computer Use or message delivery. Check actual installation and delivery separately, and do not resend a request already manually pasted into its main chat.
+---
+
+---
 **Date:** 2026-10-06T23:04:00Z
 **Trigger:** The historical audit received an additional report that an Opus turn never saw a design clarification relayed from a side chat.
 **Symptom:** Codex recorded a `codex_app.send_message_to_thread` delivery immediately after a question-card result; the corresponding native tool result contained only the question acceptance. The delivery reached the transcript much later through an explicit rollout-file read. A bounded sweep found 132 desktop deliveries with this same shape.
