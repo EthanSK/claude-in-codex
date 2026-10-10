@@ -24,6 +24,24 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-10T13:16:46Z
+**Trigger:** Ethan approved fixing the two bridge defects found while comparing T3 Code orchestrator v2 with our adapter.
+**Symptom:** An isolated idle reload sent a completed response's final session marker, then exited with the previous marker still on disk. The next process could not resume that completed turn.
+**Root cause:** `State.save()` waits 200 ms on an unref timer; the idle watcher called `process.exit(0)` without flushing that pending save.
+**Fix:** Both planned exit paths in `src/server.js` call the existing synchronous `State.flush()` before exit. Startup failures do not use this path, so a failed second instance cannot save stale state over a running bridge. This does not cover abrupt kills or hard crashes, and does not add per-stream-chunk writes.
+**Guard:** The existing isolated source-reload test now reads `state.json` after the child exits and checks the exact final marker and owning chat. That assertion fails on the previous source. All 73 tests pass on Node 22.23.1, including native-work and disconnected-compaction reload protections; installed runtime verification remains separate.
+---
+
+---
+**Date:** 2026-10-10T13:16:46Z
+**Trigger:** The same comparison reproduced `Do X`, an interruption note, then `Do Y` becoming one current Claude request.
+**Symptom:** The stopped request was joined to the new request; fresh text following the abort tag in the same text part could instead be dropped entirely.
+**Root cause:** The backwards prompt scan skipped `<turn_aborted>` as context instead of ending earlier work. The classifier returned `aborted` before checking for fresh text after the closing tag.
+**Fix:** `src/codexInput.js` treats a leading, closed interruption note as a prompt-run boundary. Earlier work stays ordered history; later user messages remain additive. Fresh text following the note stays verbatim, including when the note and request occupy separate parts of one message. GPT sanitization and ordinary quoted/incomplete tags retain their existing behavior.
+**Guard:** Four parser regressions cover new/resumed sessions, interruption-only requests, combined text, separate content parts and ordinary additive messages. Three positive cases fail on the previous source; the negative case already passes. The full 73-test suite passes. This proves the supported request shapes, not every desktop Stop frame or model obedience; no real desktop interruption was captured in this task.
+---
+
+---
 **Date:** 2026-10-08T18:20:00Z
 **Trigger:** A GPT side chat failed to send an authorized follow-up to its main chat with `sendRequest.bind is not a function`.
 **Symptom:** Reading chats worked, but sending failed before delivery. The Claude bridge was healthy, and a separate upstream report records the same failure (openai/codex #51790).

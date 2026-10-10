@@ -565,7 +565,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
 
 const isMain = process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname);
 if (isMain) {
-  const { server, log, config } = createBridge();
+  const { server, log, config, state } = createBridge();
   claudeCapabilities(config.claudePath).then((caps) => {
     if (!caps.ok) log.error(`claude CLI not found at "${config.claudePath}" — set claudePath in ${BRIDGE_HOME}/config.json`);
     else log.info(`claude CLI ok (${config.claudePath})`);
@@ -577,8 +577,12 @@ if (isMain) {
   // Reload after code updates: exit once idle and let launchd restart us with the new code.
   let active = 0;
   let reloadPending = false;
+  const exitGracefully = () => { // Planned exits must save the final marker; startup failures must not overwrite another bridge's state.
+    state.flush();
+    process.exit(0);
+  };
   const restartIfIdle = () => {
-    if (active === 0 && !hasActiveClaudeTurns()) process.exit(0); // Codex tool handoffs end the HTTP response while the same Claude turn is still waiting for its result.
+    if (active === 0 && !hasActiveClaudeTurns()) exitGracefully(); // Codex tool handoffs end the HTTP response while the same Claude turn is still waiting for its result.
   };
   server.on('request', (req, res) => {
     active++;
@@ -605,7 +609,7 @@ if (isMain) {
   } catch (err) {
     log.error(`could not watch ${srcDir}: ${err.message}`);
   }
-  const stop = () => server.close(() => process.exit(0));
+  const stop = () => server.close(exitGracefully);
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
 }

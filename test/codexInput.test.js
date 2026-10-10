@@ -123,6 +123,62 @@ test('injected context and instruction sources retain their original classificat
   ]) assert.equal(classifyUserText(text), kind);
 });
 
+test('an interrupted request stays history while later user messages remain current', () => {
+  const aborted = userMessage('<turn_aborted>The user interrupted this turn.</turn_aborted>');
+  for (const resumed of [false, true]) {
+    const input = [
+      ...(resumed ? [{ type: 'reasoning', encrypted_content: makeMarker('session', 'turn') }] : []),
+      userMessage('Do X.'),
+      { type: 'reasoning', id: 'rs_ccb_interrupted', summary: [] },
+      aborted,
+      userMessage('Do Y.'),
+      userMessage('Keep the original formatting.'),
+    ];
+    const parsed = parseCodexRequest({ input }, () => resumed);
+    assert.equal(parsed.promptText, 'Do Y.\n\nKeep the original formatting.');
+    assert.match(parsed.context, /User:\nDo X\./);
+    assert.match(parsed.context, /The user interrupted that turn/);
+    assert.ok(parsed.context.indexOf('Do X.') < parsed.context.indexOf('interrupted'), 'retain the stopped request before its interruption note');
+    assert.ok(sanitizeInputForOpenAI(input).input.includes(aborted), 'GPT still receives its original interruption note');
+    const stopped = parseCodexRequest({ input: input.slice(0, -2) }, () => resumed);
+    assert.equal(stopped.promptText, '', 'an interruption alone must not reissue the stopped request');
+  }
+});
+
+test('a new request following an abort tag stays current without reviving earlier work', () => {
+  const text = '<turn_aborted>The user interrupted this turn.</turn_aborted>\n\nDo Y.';
+  assert.equal(classifyUserText(text), 'prompt');
+  for (const resumed of [false, true]) {
+    const input = [
+      ...(resumed ? [{ type: 'reasoning', encrypted_content: makeMarker('session', 'turn') }] : []),
+      userMessage('Do X.'),
+      userMessage(text),
+    ];
+    const parsed = parseCodexRequest({ input }, () => resumed);
+    assert.equal(parsed.promptText, text, 'keep the new request and its interruption wrapper verbatim');
+    assert.match(parsed.context, /User:\nDo X\./);
+  }
+});
+
+test('an abort and fresh request in separate content parts end the earlier prompt run', () => {
+  const input = [userMessage('Do X.'), { type: 'message', role: 'user', content: [
+    { type: 'input_text', text: '<turn_aborted>The user interrupted this turn.</turn_aborted>' },
+    { type: 'input_text', text: 'Do Y.' },
+  ] }];
+  const parsed = parseCodexRequest({ input });
+  assert.equal(parsed.promptText, 'Do Y.');
+  assert.match(parsed.context, /User:\nDo X\./);
+  assert.match(parsed.context, /The user interrupted the previous turn/);
+});
+
+test('ordinary additive requests and quoted or incomplete abort tags keep their existing boundaries', () => {
+  for (const text of ['Keep going.', 'Explain the literal <turn_aborted> marker.', '<turn_aborted>Explain this incomplete tag.']) {
+    const parsed = parseCodexRequest({ input: [userMessage('Do X.'), userMessage(text)] });
+    assert.equal(parsed.promptText, `Do X.\n\n${text}`);
+    assert.equal(parsed.context, '');
+  }
+});
+
 test('model-switch history keeps earlier image pixels separate from the current attachment', () => {
   const earlier = { ...userMessage('Earlier screenshot'), content: [{ type: 'input_text', text: 'Earlier screenshot' }, { type: 'input_image', image_url: 'data:image/png;base64,EARLIER' }] };
   const latest = { ...userMessage('Compare the screenshots'), content: [{ type: 'input_text', text: 'Compare the screenshots' }, { type: 'input_image', image_url: 'data:image/jpeg;base64,CURRENT' }] };

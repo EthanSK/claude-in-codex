@@ -66,7 +66,7 @@ export function classifyUserText(text) {
   if (!text.includes(closingTag)) return 'prompt';
   if (tag === 'environment_context') return 'environment';
   if (tag === 'user_instructions') return 'agents_md';
-  if (tag === 'turn_aborted') return 'aborted';
+  if (tag === 'turn_aborted') return text.slice(text.lastIndexOf(closingTag) + closingTag.length).trim() ? 'prompt' : 'aborted'; // An interruption note can share its text part with the next user request.
   if (tag === 'image') return 'prompt';
   if (['send_user_message_question_reply', 'speech', 'speech_segment', 'typed_text', 'potential_tts', 'agent_flow_context'].includes(tag)) return 'prompt'; // Question answers and Agent Flow authored text are current user messages; the wrapper must not turn them into earlier context.
   if (text.slice(text.lastIndexOf(closingTag) + closingTag.length).trim()) return 'prompt'; // A selection or ambient-context block can precede the actual request; keep the whole message so quoted content retains its boundaries.
@@ -246,10 +246,12 @@ export function parseCodexRequest(body, isLatestTurn = () => false, agentMessage
   let promptStart = newItems.length;
   for (let i = newItems.length - 1; i >= 0; i--) {
     const it = newItems[i];
+    const interrupted = it?.type === 'message' && it.role === 'user' && (it.content || []).some((c) => c.type === 'input_text' && /^\s*<turn_aborted[\s>][\s\S]*<\/turn_aborted>/i.test(c.text)); // Stop earlier requests here, including when the interruption and fresh request share one message.
     if (isPromptMessage(it)) {
       promptStart = i;
-      continue;
+      if (!interrupted) continue;
     }
+    if (interrupted) break;
     if (it?.type === 'message' && it.role !== 'assistant' && !isBridgeItem(it)) continue; // context fragments between prompts
     if (it?.type === 'reasoning' || it?.type === 'compaction_trigger') continue;
     break;

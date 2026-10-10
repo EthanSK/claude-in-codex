@@ -138,6 +138,8 @@ Codex can put a long paste in `Pasted text.txt`, followed by an empty `My reques
 
 Switch freely. Switching doesn't make Codex compact the chat.
 
+When a request contains Codex's `<turn_aborted>` note, earlier user instructions stay in history instead of being joined to the new request. A new request following that note in the same message is preserved too.
+
 | Switch | What the next model sees |
 |---|---|
 | GPT → Claude, first time in a chat | A new Claude session with the chat so far as text: your messages, GPT's replies, and GPT's commands with their output (each output cut to 2,000 characters). Only the latest 60,000 text characters are passed. Earlier user and tool-result images are also passed as image blocks, labelled as history. GPT's reasoning is encrypted by OpenAI, so Claude never sees it. |
@@ -211,7 +213,7 @@ After changing the config, restart the service, then restart Codex so it reloads
 launchctl kickstart -k gui/$(id -u)/com.codex-claude-bridge
 ```
 
-Code changes in `src/` are picked up automatically once every request and WebSocket connection closes and native Claude work has finished. Codex tool handoffs close one response while Claude waits for the result; the watcher now waits for that turn, and for compaction even if its HTTP client disconnected. A long-lived GPT WebSocket can still delay restart; check the service's PID or a fresh `listening on` log line before claiming the new code is live. If a restart is needed, wait for active turns to finish before using the command above.
+Code changes in `src/` are picked up automatically once every request and WebSocket connection closes and native Claude work has finished. Codex tool handoffs close one response while Claude waits for the result; the watcher now waits for that turn, and for compaction even if its HTTP client disconnected. Before a graceful exit, the bridge saves its latest session markers so the next process can resume completed turns. This does not protect against an abrupt kill or hard crash. A long-lived GPT WebSocket can still delay restart; check the service's PID or a fresh `listening on` log line before claiming the new code is live. If a restart is needed, wait for active turns to finish before using the command above.
 
 ### Full permissions for Claude turns
 

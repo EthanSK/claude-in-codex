@@ -6,6 +6,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { parseMarker } from '../src/codexInput.js';
 
 async function startReloadBridge(t, scenario) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-reload-test-'));
@@ -63,6 +64,11 @@ test('source reload waits for a Claude turn between Codex tool responses', { tim
   assert.match(finished.output.find((item) => item.type === 'message').content[0].text, /reload waited correctly/);
   await bridge.closed;
   assert.equal(bridge.child.exitCode, 0, bridge.log());
+  const marker = parseMarker(finished.output.find((item) => item.encrypted_content)?.encrypted_content);
+  assert.ok(marker, 'the completed response must carry its session marker');
+  const saved = JSON.parse(fs.readFileSync(path.join(bridge.directory, 'state.json'), 'utf8'));
+  assert.equal(saved.sessions[marker.sid]?.lastTurnId, marker.turnId, 'reload must save the final marker that Codex received');
+  assert.equal(saved.sessions[marker.sid]?.threadId, 'reload-owner');
 });
 
 test('source reload waits for compaction after its HTTP client disconnects', { timeout: 8000 }, async (t) => {
@@ -72,7 +78,7 @@ test('source reload waits for compaction after its HTTP client disconnects', { t
   await reader.read();
   const deadline = Date.now() + 2000;
   while (!fs.existsSync(path.join(bridge.directory, 'claude.log')) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.ok(fs.existsSync(path.join(bridge.directory, 'claude.log')), 'the native compaction must have started');
+  assert.ok(fs.existsSync(path.join(bridge.directory, 'claude.log')), `the native compaction must have started: ${bridge.log()}`);
   await reader.cancel();
   fs.appendFileSync(path.join(bridge.directory, 'src/toolDisplay.js'), '\n');
   await new Promise((resolve) => setTimeout(resolve, 900));
