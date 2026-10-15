@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-15T14:48:42Z
+**Trigger:** An Opus desktop side chat remained on Thinking long after writing its answer.
+**Symptom:** Native assistant text ended at 14:24 UTC, but its CLI process and an obsolete background transcript-search pipeline remained alive over twenty minutes later. Later user messages were queued rather than answered.
+**Root cause:** Claude Code had moved a broad log search to the background after its 120-second shell timeout. The agent's attempted cancellation did not match the remaining search. The bridge intentionally waits for the native CLI's close event before saving its final session marker and completing the response; a native assistant `end_turn` record was not sufficient. This incident did not require a routing repair.
+**Fix:** Verified the exact affected session and full parent chain, then sent TERM only to the obsolete read-only grep process. The search pipeline and original CLI exited; state recorded the completed turn at 14:48:42 UTC, and the next request resumed that same session immediately. The existing queued user messages then appeared in the native transcript. No app/service restart, broad process kill, new chat message or source-runtime change was used.
+**Guard:** README troubleshooting now distinguishes native background work from routing failure and recommends bounded known-file searches. Read-only checks confirmed the original CLI/search exited, bridge PID stayed unchanged, health passed and the session resumed. This is live recovery evidence, not a general guarantee that every Thinking stall is a background task; no automatic timeout or background-task killer was added.
+---
+
+---
 **Date:** 2026-10-10T13:16:46Z
 **Trigger:** Ethan approved fixing the two bridge defects found while comparing T3 Code orchestrator v2 with our adapter.
 **Symptom:** An isolated idle reload sent a completed response's final session marker, then exited with the previous marker still on disk. The next process could not resume that completed turn.
