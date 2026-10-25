@@ -55,6 +55,10 @@ A scratch copy of the previous source confirmed four defects:
 - 10 identical catalogue refreshes caused 10 full writes.
 
 **Limits:** A Claude turn whose chat is never sent another request (Codex quit, or the chat abandoned) still waits for up to 24 hours by design; `/health` and `resources reason=long-wait` now show it. Editing an earlier message and sending it to GPT is not matched, because the pending call is gone from that history; this logs `model-switch-kept-waiting`. WebSocket compression and send buffering are observed, not limited, because nothing shows they caused a spike. Installed-service verification is separate.
+
+**Installed verification (2026-10-25):** After Codex quit and restarted, the source watcher reloaded the installed service. Its fresh `/health` returned diagnostics, all 179 pre-existing session records were unchanged, and the turn-state file shrank from 16,152,353 to 38,200 bytes before a smoke session was added. The separate catalogue cache was about 5.6 MB. During the subsequent check, 161 unchanged catalogue refreshes caused no catalogue rewrites and no write errors. A real Opus tool round trip on the live service produced `spawn`, `handoff`, `resume`, and `exit code=0 reason=completed` for one PID, with zero remaining Claude turns.
+
+**Startup observation:** A controlled smoke request using a projectless directory under Documents failed in the launchd service with Claude Code's immediate `Unexpected` error (before any API usage). The same source and request worked in a foreground test service; the live service also passed when only the smoke working directory was moved to a dedicated temporary folder. A second isolated test with a deliberately minimal environment reached the API but lacked login credentials. Keep these separate: the exact Documents startup cause is unverified, and neither changing the requested working directory silently nor copying credentials into launchd is an established repair. Preserve the failing directory and correlate lifecycle logs before diagnosing a model-routing or memory regression.
 ---
 
 ---
