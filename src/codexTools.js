@@ -90,6 +90,9 @@ export class CodexToolServer {
   }
 
   serve(socket) {
+    this.sockets ??= new Set();
+    this.sockets.add(socket);
+    socket.on('close', () => this.sockets.delete(socket));
     socket.on('error', () => {});
     const send = (message) => {
       if (!socket.destroyed) socket.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
@@ -131,6 +134,7 @@ export class CodexToolServer {
 
   close() {
     this.server?.close();
+    for (const socket of this.sockets ?? []) socket.destroy(); // server.close() alone keeps a connection from a surviving proxy open.
     if (this.dir) fs.rmSync(this.dir, { recursive: true, force: true });
   }
 }
@@ -203,11 +207,44 @@ export function findCodexResults(input, threadId) {
   return { turn, outputs, userText: userText.join('\n\n'), userAttachments, agentMessageIds };
 }
 
-/** Cancels Claude turns in this Codex thread that are still waiting for tool results. */
-export async function cancelWaitingCodexTurns(threadId) {
-  if (!threadId) return;
-  const turns = new Set([...waitingCalls.values()].map((waiting) => waiting.turn).filter((turn) => turn.threadId === threadId));
-  await Promise.all([...turns].map((turn) => turn.cancel()));
+/** Claude turns in this Codex thread that still wait for Codex tool results. */
+export function waitingCodexTurns(threadId) {
+  if (!threadId) return [];
+  return [...new Set([...waitingCalls.values()].map((waiting) => waiting.turn).filter((turn) => turn.threadId === threadId))];
+}
+
+/**
+ * Waiting Claude turns of this thread whose own pending Codex call, or the session marker emitted
+ * with it, appears in `input`: the request continues that conversation rather than being an
+ * auxiliary call that merely shares the thread ID.
+ */
+export function waitingCodexTurnsReferencedBy(input, threadId) {
+  if (!threadId || !Array.isArray(input)) return [];
+  const callIds = new Set();
+  const markers = new Set();
+  for (const item of input) {
+    if (typeof item?.call_id === 'string') callIds.add(item.call_id);
+    if (typeof item?.encrypted_content === 'string') markers.add(item.encrypted_content);
+  }
+  const turns = new Set();
+  for (const [callId, waiting] of waitingCalls) {
+    if (waiting.turn.threadId !== threadId) continue;
+    if (callIds.has(callId) || (waiting.marker && markers.has(waiting.marker))) turns.add(waiting.turn);
+  }
+  return [...turns];
+}
+
+/** Stops the given waiting Claude turns and resolves once their processes have exited. */
+export async function cancelCodexTurns(turns, reason) {
+  await Promise.all(turns.map((turn) => turn.cancel(reason)));
+}
+
+/**
+ * Cancels Claude turns in this Codex thread that are still waiting for tool results.
+ * Only the exact thread is affected: side chats and sub-agents have their own thread IDs.
+ */
+export async function cancelWaitingCodexTurns(threadId, reason = 'new-request') {
+  await cancelCodexTurns(waitingCodexTurns(threadId), reason);
 }
 
 /** Converts a Codex tool output (string or content items) into MCP content blocks. */

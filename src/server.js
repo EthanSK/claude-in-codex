@@ -13,7 +13,8 @@ import { parseCodexRequest, buildClaudeUserMessage, sanitizeInputForOpenAI, make
 import { ResponsesStream, usageObject, rid } from './responsesStream.js';
 import { runClaudeTurn, compactSession, claudeCapabilities, hasActiveClaudeTurns } from './claudeRunner.js';
 import { mergeCatalog, fallbackGptModel } from './catalog.js';
-import { findCodexResults, cancelWaitingCodexTurns } from './codexTools.js';
+import { findCodexResults, cancelWaitingCodexTurns, cancelCodexTurns, waitingCodexTurns, waitingCodexTurnsReferencedBy } from './codexTools.js';
+import { diagnostics, diagnosticsSnapshot, logLifecycle, startResourceMonitor } from './diagnostics.js';
 
 const HOP_BY_HOP = new Set([
   'host',
@@ -103,6 +104,22 @@ export function decodeBody(raw, encoding) {
   throw new Error(`unsupported content-encoding ${enc}`);
 }
 
+/** The Codex chat a request belongs to; Claude and GPT routes must agree so cancellation hits exactly one thread. */
+export function requestThreadId(headers, body) {
+  return String(headers?.['thread-id'] || headers?.['session-id'] || body?.prompt_cache_key || '') || null;
+}
+
+function byteLength(data) {
+  if (typeof data === 'string') return Buffer.byteLength(data);
+  return data?.length ?? 0;
+}
+
+/** Codex agent turns always offer tools, in `tools` or (responses-lite) an `additional_tools` item. */
+export function carriesAgentTools(body) {
+  if (Array.isArray(body?.tools) && body.tools.length > 0) return true;
+  return Array.isArray(body?.input) && body.input.some((item) => item?.type === 'additional_tools');
+}
+
 // A real Codex agent turn (vs. a housekeeping call like title generation).
 // Tools arrive either in `tools` or, in Codex's "responses-lite" shape, as an
 // `additional_tools` input item; agent turns also always carry <environment_context>.
@@ -127,6 +144,24 @@ export function createBridge(config = loadConfig(), state = new State()) {
 
   function previousResponseError(id) {
     return { type: 'invalid_request_error', code: 'previous_response_not_found', message: `Previous response with id '${id}' not found.`, param: 'previous_response_id' };
+  }
+
+  // A GPT agent turn that continues a chat whose Claude process still waits for Codex tool results
+  // means the chat moved on to GPT (for example Stop, then a GPT message): those results can never
+  // reach Claude. The request must carry that turn's own pending call or marker, so prewarm frames,
+  // housekeeping, other threads (side chats, sub-agents) and auxiliary GPT calls that only share the
+  // thread ID leave the waiting tool alone. GPT traffic never waits for Claude to exit.
+  function cancelAfterGptSwitch(threadId, body, route) {
+    if (!threadId || !body || body.generate === false || !carriesAgentTools(body)) return; // Stricter than isAgentTurn: a summary of the history with <environment_context> but no tools is housekeeping.
+    const pending = waitingCodexTurns(threadId); // Usually empty: skip scanning the GPT request's history.
+    if (!pending.length) return;
+    const turns = waitingCodexTurnsReferencedBy(body.input, threadId);
+    if (!turns.length) {
+      logLifecycle(log, 'model-switch-kept-waiting', { thread: threadId, model: body.model, route, waitingTurns: pending.map((turn) => turn.id).join(',') }); // Visible if a rollback or edit leaves a Claude turn waiting.
+      return;
+    }
+    logLifecycle(log, 'model-switch', { thread: threadId, model: body.model, route, cancelling: turns.map((turn) => turn.id).join(',') });
+    cancelCodexTurns(turns, 'gpt-switch').catch((error) => log.error(`stopping waiting Claude turns after a GPT switch failed: ${error.message}`));
   }
 
   function forwardHeaders(req, { bodyRewritten }) {
@@ -203,7 +238,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
     } catch (err) {
       log.error(`model catalog fetch failed: ${err.message}`);
     }
-    if (!upstreamModels) upstreamModels = state.data.upstreamCatalogs[cacheKey];
+    if (!upstreamModels) upstreamModels = state.upstreamCatalog(cacheKey);
     if (!upstreamModels) {
       // A successful Claude-only response would replace Codex's full list with an incomplete one.
       res.writeHead(503, { 'content-type': 'application/json' });
@@ -230,7 +265,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
     log.debug(`Claude request shape ${JSON.stringify({ keys: Object.keys(body), inputCount: Array.isArray(body.input) ? body.input.length : 0, sandboxMode: parsed.sandboxMode, hasCwd: Boolean(parsed.cwd), hasResume: Boolean(parsed.resume) })}`);
     // Side chats / forked threads start from the parent's history: give them their own
     // fork of the parent's Claude session instead of taking over the parent's session.
-    const threadId = String(req.headers['thread-id'] || req.headers['session-id'] || body.prompt_cache_key || '') || null;
+    const threadId = requestThreadId(req.headers, body);
     parsed.threadId = threadId;
     parsed.codexTurnId = String(req.headers['turn-id'] || req.headers['x-codex-turn-id'] || crypto.randomUUID());
     const owner = parsed.marker ? state.ownerThread(parsed.marker.sid) : null;
@@ -309,6 +344,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
   }
 
   function watchClientWebSocket(client) {
+    diagnostics.trackSocket(client, 'client');
     client.on('error', (error) => {
       log.error(`client websocket failed: ${error.message}`);
       client.terminate(); // A malformed client frame emits an error; close that client rather than crashing every chat in the bridge.
@@ -329,7 +365,10 @@ export function createBridge(config = loadConfig(), state = new State()) {
       delete body.previous_response_id;
       data = JSON.stringify(body); // GPT switches must also send reconstructed history, not a bridge-owned response ID.
     }
+    const metadata = body?.client_metadata || {};
+    const frameHeaders = { ...req.headers, 'thread-id': metadata.thread_id || req.headers['thread-id'] };
     if (!modelCfg) {
+      cancelAfterGptSwitch(requestThreadId(frameHeaders, body), body, 'websocket');
       // GPT frame. Strip bridge-minted items first, exactly like the HTTP path in
       // handle() does. Bug fixed 2026-09-24: this path used to forward frames
       // untouched, so a GPT side chat forked from an Opus thread that Claude had
@@ -345,7 +384,10 @@ export function createBridge(config = loadConfig(), state = new State()) {
       }
       return forwardGpt(data, isBinary, body?.model);
     }
-    const onCompleted = (response) => lastClaudeResponses.set(client, { id: response.id, input: [...(body.input || []), ...response.output] });
+    const onCompleted = (response) => {
+      lastClaudeResponses.set(client, { id: response.id, input: [...(body.input || []), ...response.output] });
+      diagnostics.setContextBytes(client, byteLength(data) + Buffer.byteLength(JSON.stringify(response.output))); // Approximate: the frame that carried this context plus Claude's reply.
+    };
     if (body.generate === false) {
       const stream = new ResponsesStream(new WebSocketResponse(client, onCompleted), { model: body.model });
       stream.begin();
@@ -358,11 +400,9 @@ export function createBridge(config = loadConfig(), state = new State()) {
       if (Array.isArray(body.input)) body.input = sanitizeInputForOpenAI(body.input).input;
       return forwardGpt(JSON.stringify(body), false, body.model);
     }
-    const metadata = body.client_metadata || {};
     const turnReq = {
       headers: {
-        ...req.headers,
-        'thread-id': metadata.thread_id || req.headers['thread-id'],
+        ...frameHeaders,
         'turn-id': metadata.turn_id || req.headers['turn-id'],
       },
     };
@@ -405,6 +445,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
               if (['host', 'connection', 'upgrade', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions'].includes(key)) delete headers[key];
             }
             upstream = new WebSocket(target, { headers, perMessageDeflate: true, handshakeTimeout: 15000 });
+            diagnostics.trackSocket(upstream, 'upstream');
             upstream.on('open', () => {
               for (const queued of pendingGpt.splice(0)) upstream.send(queued.data, { binary: queued.isBinary });
             });
@@ -434,6 +475,7 @@ export function createBridge(config = loadConfig(), state = new State()) {
     }
     socket.pause();
     const upstream = new WebSocket(target, { headers, perMessageDeflate: true, handshakeTimeout: 15000 });
+    diagnostics.trackSocket(upstream, 'upstream');
     let upstreamResponse;
     let client;
     upstream.on('upgrade', (response) => { upstreamResponse = response; });
@@ -482,7 +524,8 @@ export function createBridge(config = loadConfig(), state = new State()) {
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, models: config.models.map((m) => m.slug) }));
+      // Counts, sizes, IDs and ages only: running/waiting Claude processes, sockets, cached context and state writes.
+      return res.end(JSON.stringify({ ok: true, models: config.models.map((m) => m.slug), diagnostics: diagnosticsSnapshot({ state }) }));
     }
     if (!url.pathname.startsWith(BASE_PATH)) {
       res.writeHead(404);
@@ -526,6 +569,8 @@ export function createBridge(config = loadConfig(), state = new State()) {
       }
     }
 
+    if (subpath === '/responses' && !modelCfg) cancelAfterGptSwitch(requestThreadId(req.headers, body), body, 'http');
+
     // Everything else goes to OpenAI. Housekeeping calls made "as" a Claude model
     // (titles, summaries, memories) are answered by a GPT model instead.
     let rewritten = false;
@@ -547,6 +592,8 @@ export function createBridge(config = loadConfig(), state = new State()) {
   }
 
   const server = http.createServer((req, res) => {
+    diagnostics.requestStarted();
+    res.once('close', () => diagnostics.requestFinished());
     handle(req, res).catch((err) => {
       log.error(`request failed: ${err.stack || err}`);
       if (!res.headersSent) res.writeHead(500);
@@ -573,6 +620,7 @@ if (isMain) {
   server.listen(config.port, config.host, () => {
     log.info(`listening on http://${config.host}:${config.port}${BASE_PATH} → ${config.upstream}`);
     log.info(`Claude models: ${config.models.map((m) => `${m.displayName} (${m.slug})`).join(', ')}`);
+    startResourceMonitor({ log, state }); // Started only after a successful listen, so a failed second instance logs nothing extra.
   });
   // Reload after code updates: exit once idle and let launchd restart us with the new code.
   let active = 0;

@@ -24,6 +24,40 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-25T19:38:50Z
+**Trigger:** Ethan asked whether our Codex tooling leaks memory before system-wide crashes, then asked for proper fixes and bridge logs that would catch a future spike.
+**Symptom:** Codex's process report matched that day's largest event to overlapping AIMVS builds and tests (60 processes, about 39 GiB), not the bridge. No stranded Claude children were present under the live bridge. Three bridge defects were nevertheless real:
+- A same-chat GPT turn after a Claude tool handoff left the waiting Claude process alive for up to 24 hours. Codex reproduced this with the fake runner.
+- Cancelling a Claude CLI that ignored SIGINT and SIGTERM hung the next request in that chat indefinitely.
+- macOS attributed 137.45 GB of file-backed writes over 60,700 seconds to the live bridge, whose `state.json` was 16,152,353 bytes (179 sessions, 31 cached catalogues).
+
+**Root cause:**
+- Only a later *Claude* request on the same thread cancelled a waiting turn, so the GPT routes never did.
+- `stopClaude` sent SIGINT, then SIGTERM to the CLI alone: no SIGKILL and no descendants. `cancel()` awaited the `close` event, which also needs every stdio pipe closed.
+- `setUpstreamModels` saved after every successful `/models` response, even when unchanged. Every save serialized all sessions plus every catalogue with indentation, and catalogues were never pruned. The debounce also cleared its timer on each save, so continuous activity could postpone the durable marker write indefinitely.
+
+**Fix:**
+- Cancellation (`src/server.js`, `src/codexTools.js`): a GPT agent turn stops a waiting Claude turn only if it carries tools, has the same thread ID and still contains that turn's pending call ID or session marker. The GPT request is not delayed. A cancelled turn forgets its pending calls at once, so a late result starts a normal resumed turn.
+- Process control (`src/processControl.js`): snapshot the owned tree before SIGINT; after 4 s send SIGTERM and after 4 s more SIGKILL to any survivors, including descendants orphaned by a parent that exited on SIGINT. Verify remembered process start times before signalling, and include pending cleanup in the idle-reload guard. Process groups are untouched, so launchd's own cleanup is unchanged. Stdio pipes are released 5 s after exit.
+- Diagnostics (`src/diagnostics.js`): structured `lifecycle` lines (spawn, handoff, resume, stop, signal, exit with reason and duration, model-switch), a `/health` `diagnostics` snapshot, and sparse `resources` lines covering RSS, heap, process states, WebSocket counts and buffers, approximate cached context and state writes.
+- State (`src/state.js`): catalogues live in a separate `state.catalogs.json`, deduplicated by content hash and capped at 16 most recently used request contexts. Unchanged catalogues and unchanged state are never rewritten. A catalogue that changes on every fetch is written at most once a minute. The 200 ms session-marker timer coalesces without postponing. Legacy fields migrate on load without a constructor write, and are dropped only after a successful cache write. If migration fails, keep the legacy fallback fields while persisting new session markers, then remove them after a successful retry.
+
+**Guard:** 19 new regression tests (92 total pass):
+- `test/lifecycle.test.js`: HTTP and WebSocket GPT switch; reconnect without cancellation; other chats, housekeeping with history, prewarm with history and agent calls that only share the thread ID; wedged CLI plus grandchild escalation then resume; orphan cleanup after a graceful parent exit while an unrelated process survives; no escalation when children exit themselves; forced stdio release.
+- `test/state.test.js`: legacy migration with deduplication, bounding, no write at startup and a smaller file; no rewrite when nothing changed; a rate-limited catalogue that changes on every fetch; least-recently-used eviction; non-starving saves; a damaged catalogue file; failed migration preserving fallback catalogs and new session markers through retry.
+- `test/diagnostics.test.js`: one-line bounded fields, counters, socket cleanup and monitor triggers.
+- `test/codexTools.test.js`: reference matching, including cross-thread safety.
+
+A scratch copy of the previous source confirmed four defects:
+- Claude was alive 1.5 s after the GPT switch.
+- The next request after a wedged cancel was still hung at 10 s.
+- 700 ms of continuous saves never reached disk.
+- 10 identical catalogue refreshes caused 10 full writes.
+
+**Limits:** A Claude turn whose chat is never sent another request (Codex quit, or the chat abandoned) still waits for up to 24 hours by design; `/health` and `resources reason=long-wait` now show it. Editing an earlier message and sending it to GPT is not matched, because the pending call is gone from that history; this logs `model-switch-kept-waiting`. WebSocket compression and send buffering are observed, not limited, because nothing shows they caused a spike. Installed-service verification is separate.
+---
+
+---
 **Date:** 2026-10-15T14:48:42Z
 **Trigger:** An Opus desktop side chat remained on Thinking long after writing its answer.
 **Symptom:** Native assistant text ended at 14:24 UTC, but its CLI process and an obsolete background transcript-search pipeline remained alive over twenty minutes later. Later user messages were queued rather than answered.

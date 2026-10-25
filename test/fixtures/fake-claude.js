@@ -12,12 +12,24 @@ if (args.includes('--help')) {
 }
 
 const log = process.env.FAKE_CLAUDE_LOG;
+const ignoreStop = process.env.FAKE_CLAUDE_IGNORE_STOP === '1';
+if (ignoreStop) {
+  // A wedged CLI: only SIGKILL ends it.
+  process.on('SIGINT', () => {});
+  process.on('SIGTERM', () => {});
+}
 let stdin = '';
 process.stdin.on('data', (d) => (stdin += d));
 process.stdin.on('end', () => {
   const resumeIdx = args.indexOf('--resume');
   const sid = resumeIdx >= 0 && !args.includes('--fork-session') ? args[resumeIdx + 1] : crypto.randomUUID();
-  if (log) fs.appendFileSync(log, JSON.stringify({ args, stdin, cwd: process.cwd(), threadId: process.env.CODEX_THREAD_ID ?? null, pid: process.pid }) + '\n');
+  let grandchildPid = null;
+  if (process.env.FAKE_CLAUDE_GRANDCHILD === '1') {
+    // A tool subprocess that also ignores polite signals, like a stuck background shell.
+    const grandchild = spawn(process.execPath, ['-e', "process.on('SIGINT',()=>{});process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: 'ignore' });
+    grandchildPid = grandchild.pid;
+  }
+  if (log) fs.appendFileSync(log, JSON.stringify({ args, stdin, cwd: process.cwd(), threadId: process.env.CODEX_THREAD_ID ?? null, pid: process.pid, grandchildPid }) + '\n');
   const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 
   if (args.includes('/compact')) {

@@ -74,6 +74,6 @@ export function mergeCatalog(config, state, upstreamModels) {
 
 export function fallbackGptModel(config, state) {
   if (config.fallbackModel) return config.fallbackModel;
-  const t = pickTemplate(state.data.upstreamModels || []);
+  const t = pickTemplate(state.upstreamModels() || []);
   return t?.slug || 'gpt-5.5';
 }

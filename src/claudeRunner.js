@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { rid, usageObject } from './responsesStream.js';
 import { makeMarker } from './codexInput.js';
 import { describeToolUse, describeToolError } from './toolDisplay.js';
+import { diagnostics, logLifecycle } from './diagnostics.js';
+import { createProcessStopper, closeStdioAfterExit, hasPendingProcessCleanup } from './processControl.js';
 import {
   CODEX_TOOLS_SERVER,
   CodexToolServer,
@@ -83,9 +85,25 @@ export async function claudeCapabilities(claudePath) {
 const sessionLocks = new Map();
 let activeCompactions = 0;
 
+// After Claude Code exits, wait this long for its stdout/stderr to close before releasing them ourselves.
+const STDIO_CLOSE_GRACE_MS = 5000;
+
+/** SIGINT first, then SIGTERM and SIGKILL to the process tree after bounded grace periods (see processControl.js). */
+function stopperFor(child, config, log, id) {
+  const graceMs = config.claudeStopGraceMs ?? 4000;
+  return createProcessStopper(child, {
+    graceMs,
+    killGraceMs: graceMs,
+    onEscalate: (signal, processes) => {
+      diagnostics.processEscalated(id);
+      logLifecycle(log, 'signal', { turn: id, pid: child.pid, signal, processes });
+    },
+  });
+}
+
 /** Whether native Claude work still needs this bridge, including waits between Codex responses. */
 export function hasActiveClaudeTurns() {
-  return sessionLocks.size > 0 || activeCompactions > 0;
+  return sessionLocks.size > 0 || activeCompactions > 0 || hasPendingProcessCleanup();
 }
 
 async function withSessionLock(key, fn) {
@@ -229,22 +247,38 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       }`,
     );
 
+    const nativeTurnId = rid('turn_'); // Correlates this native process's lifecycle lines and /health entry; never derived from prompt content.
+    const session = parsed.resume ? (parsed.fork ? 'fork' : 'resume') : 'new';
     const child = spawn(config.claudePath, args, {
       cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const exited = new Promise((resolve) => child.on('close', resolve));
+    diagnostics.processStarted({ id: nativeTurnId, kind: 'turn', threadId: parsed.threadId, codexTurnId: parsed.codexTurnId, pid: child.pid, model: modelCfg.claudeModel, session });
+    logLifecycle(log, 'spawn', { turn: nativeTurnId, thread: parsed.threadId, codexTurn: parsed.codexTurnId, pid: child.pid, model: modelCfg.claudeModel, session, codexTools: catalog.size });
+    const stopper = stopperFor(child, config, log, nativeTurnId);
+    closeStdioAfterExit(child, STDIO_CLOSE_GRACE_MS, () => {
+      diagnostics.processStdioForced(nativeTurnId);
+      logLifecycle(log, 'stdio-forced-close', { turn: nativeTurnId, pid: child.pid });
+    });
+    child.once('close', (code, signal) => {
+      const ended = diagnostics.processEnded(nativeTurnId);
+      if (!ended) return;
+      const reason = ended.endReason ?? (ended.pid === null ? 'spawn-error' : code === 0 ? 'completed' : 'failed');
+      logLifecycle(log, 'exit', { turn: nativeTurnId, thread: parsed.threadId, pid: ended.pid, code, signal, reason, durationMs: ended.durationMs, handoffs: ended.handoffs });
+    });
 
     let finished = false;
-    const stopClaude = () => {
-      child.kill('SIGINT');
-      setTimeout(() => child.exitCode === null && child.kill('SIGTERM'), 4000).unref();
+    const stopClaude = (reason) => {
+      const stopping = diagnostics.processStopping(nativeTurnId, reason);
+      if (stopping) logLifecycle(log, 'stop', { turn: nativeTurnId, thread: parsed.threadId, pid: child.pid, reason, waitedMs: stopping.waitedMs });
+      stopper.stop();
     };
     const onClientGone = () => {
       if (finished) return;
       log.info('codex closed the stream; stopping claude');
-      stopClaude();
+      stopClaude('client-gone');
     };
     // res 'close' fires on normal finish too; only act if we hadn't finished writing.
     const watchClient = (res) => res.on('close', () => {
@@ -306,6 +340,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     // Handing Claude's Codex tool calls to Codex: end this response with the calls and wait for Codex's next request.
     const waiting = new Map(); // callId -> call handed to Codex
     const turn = {
+      id: nativeTurnId,
       threadId: parsed.threadId,
       agentMessageIds: new Set(parsed.agentMessageIds),
       // Codex sent the results: continue this same Claude process in Codex's new response.
@@ -313,6 +348,8 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
         stream = nextStream;
         watchClient(stream.res);
         const calls = [...waiting.values()];
+        const waitedMs = diagnostics.processResumed(nativeTurnId);
+        logLifecycle(log, 'resume', { turn: nativeTurnId, thread: parsed.threadId, waitedMs, results: [...outputs.keys()].length, calls: calls.length });
         forgetCodexCalls(waiting.keys());
         waiting.clear();
         calls.forEach((call, index) => {
@@ -330,11 +367,12 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
         for (const ev of heldEvents.splice(0)) handle(ev);
         scheduleCodexHandoff();
       },
-      // The user moved on without returning results (for example after stopping the turn), so this process would wait forever.
-      async cancel() {
+      // The user moved on without returning results (a new message, Stop then a new request, or a switch to GPT), so this process would wait for up to 24 hours.
+      async cancel(reason = 'new-request') {
         log.info('codex did not return tool results; stopping the waiting claude turn');
-        stopClaude();
-        await exited;
+        forgetCodexCalls(waiting.keys()); // A late result must start a normal resumed turn, not attach to this exiting process.
+        stopClaude(reason);
+        await exited; // Bounded: SIGINT, then SIGTERM/SIGKILL to the tree, then forced stdio close.
       },
     };
     let handoffTimer = null;
@@ -368,7 +406,9 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
         waiting.set(call.callId, call);
       }
       waitForCodexResults(calls, turn, marker);
+      diagnostics.processWaiting(nativeTurnId);
       log.info(`handed ${calls.map((call) => call.entry.name).join(', ')} to codex`);
+      logLifecycle(log, 'handoff', { turn: nativeTurnId, thread: parsed.threadId, tools: calls.map((call) => call.entry.name).join(','), calls: calls.length });
       stream.complete(usageSoFar(ctx), { endTurn: false });
       stream = null;
     }
@@ -541,13 +581,29 @@ export async function compactSession({ config, sid, cwd, log, threadId, fork = f
       env: claudeEnvironment(threadId),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const id = rid('compact_');
+    const session = fork ? 'fork' : 'resume';
     activeCompactions++;
-    child.once('close', () => { activeCompactions--; }); // A disconnected HTTP client can leave compaction running; reload must wait for that native process too.
+    diagnostics.processStarted({ id, kind: 'compact', threadId, pid: child.pid, session });
+    logLifecycle(log, 'spawn', { turn: id, kind: 'compact', thread: threadId, pid: child.pid, session });
+    const stopper = stopperFor(child, config, log, id);
+    closeStdioAfterExit(child, STDIO_CLOSE_GRACE_MS, () => {
+      diagnostics.processStdioForced(id);
+      logLifecycle(log, 'stdio-forced-close', { turn: id, pid: child.pid });
+    });
+    child.once('close', (code, signal) => {
+      activeCompactions--; // A disconnected HTTP client can leave compaction running; reload must wait for that native process too.
+      const ended = diagnostics.processEnded(id);
+      if (ended) logLifecycle(log, 'exit', { turn: id, kind: 'compact', thread: threadId, pid: ended.pid, code, signal, reason: ended.endReason ?? (code === 0 ? 'completed' : 'failed'), durationMs: ended.durationMs });
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
-    const timer = setTimeout(() => child.kill('SIGTERM'), 10 * 60 * 1000);
+    const timer = setTimeout(() => {
+      if (diagnostics.processStopping(id, 'timeout')) logLifecycle(log, 'stop', { turn: id, kind: 'compact', thread: threadId, pid: child.pid, reason: 'timeout' });
+      stopper.stop();
+    }, 10 * 60 * 1000);
     const done = (code) => {
       clearTimeout(timer);
       let result;

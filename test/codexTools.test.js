@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findCodexResults, waitForCodexResults, forgetCodexCalls } from '../src/codexTools.js';
+import { findCodexResults, waitForCodexResults, forgetCodexCalls, waitingCodexTurnsReferencedBy, waitingCodexTurns } from '../src/codexTools.js';
 import { chatDelivery } from './fixtures/codex-delegation.js';
 
 test('a chat delivery survives a later tool marker and is acknowledged only after delivery', () => {
@@ -103,5 +103,25 @@ test('tool continuations keep new text and image pixels on either side of the to
     assert.equal(findCodexResults([marker, call, output, current], 'another-thread'), null);
   } finally {
     forgetCodexCalls([call.call_id]);
+  }
+});
+
+test('a model switch matches only the waiting turn whose pending call or marker continues in that same chat', () => {
+  const main = { threadId: 'main-chat' };
+  const other = { threadId: 'other-chat' };
+  waitForCodexResults([{ callId: 'main-call', entry: { name: 'exec' } }], main, 'ccb:v1:main-session:handoff');
+  waitForCodexResults([{ callId: 'other-call', entry: { name: 'exec' } }], other, 'ccb:v1:other-session:handoff');
+  try {
+    const call = { type: 'custom_tool_call', call_id: 'main-call', name: 'exec' };
+    const marker = { type: 'reasoning', encrypted_content: 'ccb:v1:main-session:handoff' };
+    const aborted = { type: 'custom_tool_call_output', call_id: 'main-call', output: 'aborted' };
+    assert.deepEqual(waitingCodexTurnsReferencedBy([call, aborted], 'main-chat'), [main]);
+    assert.deepEqual(waitingCodexTurnsReferencedBy([marker], 'main-chat'), [main], 'the marker identifies the pending turn when Codex drops the call');
+    assert.deepEqual(waitingCodexTurnsReferencedBy([call, marker], 'other-chat'), [], 'a side chat inheriting this history must not stop the parent');
+    assert.deepEqual(waitingCodexTurnsReferencedBy([{ type: 'message', role: 'user', content: [] }], 'main-chat'), [], 'a call that shares the thread ID but not the pending call is left alone');
+    assert.deepEqual(waitingCodexTurnsReferencedBy([call], null), []);
+    assert.deepEqual(waitingCodexTurns('main-chat'), [main]);
+  } finally {
+    forgetCodexCalls(['main-call', 'other-call']);
   }
 });
