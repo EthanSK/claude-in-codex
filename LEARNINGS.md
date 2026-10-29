@@ -24,6 +24,15 @@ Each entry looks like:
 (newest first)
 
 ---
+**Date:** 2026-10-29T18:35:00Z
+**Trigger:** Switching a projectless Documents chat from GPT to Opus produced `Claude Code stopped: error: An unknown error occurred (Unexpected)`.
+**Symptom:** Four native Claude processes exited in 5–314 ms with no handoffs. The bridge stayed healthy; the CLI's interactive `--version` and login-status checks passed.
+**Root cause:** The service's actual versioned Node executable had Documents-folder access denied by macOS. A one-shot LaunchAgent using that same Node reproduced `readdirSync(chatFolder)` → `EPERM` and `claude --version` in that folder → exit 1 with the exact error. The same LaunchAgent could read the bridge's Projects directory and run `claude --version` there successfully. A read-only privacy-record check confirmed the current Node path was denied while previous Node versions had grants. This resolves the earlier October 25 startup observation; it was not a Claude-model or login failure.
+**Fix:** The runtime repair is the owner's approved Documents-folder grant for the actual Node executable, followed by the same background probe and an original-folder Claude smoke turn. README now documents the narrow grant and separate verification. No source change, working-directory substitution, credential copy or direct privacy-database edit is needed. Permission approval and installed acceptance remain pending until verified separately.
+**Guard:** Keep startup probes in the same launchd context and original working directory. A terminal-only test or an older executable's permission does not establish access for the running service. The reproduction used only directory reads and `--version`, with no model turn or paid API usage.
+---
+
+---
 **Date:** 2026-10-25T19:38:50Z
 **Trigger:** Ethan asked whether our Codex tooling leaks memory before system-wide crashes, then asked for proper fixes and bridge logs that would catch a future spike.
 **Symptom:** Codex's process report matched that day's largest event to overlapping AIMVS builds and tests (60 processes, about 39 GiB), not the bridge. No stranded Claude children were present under the live bridge. Three bridge defects were nevertheless real:
