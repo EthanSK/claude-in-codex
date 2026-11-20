@@ -25,6 +25,14 @@ Each entry looks like:
 
 ---
 **Date:** 2026-11-20
+**Trigger:** The Live update banner chat failed after compaction even on the current Antigravity CLI.
+**Symptom:** The bridge showed its empty-reply error. Antigravity recorded a rejected permission immediately before cancelling each prompt, with zero Codex tool handoffs. The pending-tool update had suppressed the retry.
+**Fix:** Track permission outcomes by tool-call ID. Continue once when the first prompt has no visible reply and every reported tool was explicitly declined. Name the Codex shell tools in the provider instructions and in recovery. The bridge starts an adapter for each Neon turn, so this adapter-only fix takes effect on new turns while unrelated active work finishes. Preserve approval checks and never replay a prompt after an approved or untracked tool.
+**Guard:** The ACP fixture reproduces a pending tool followed by a permission rejection and proves it continues to a visible reply. A separate fixture approves the tool and proves the bridge does not replay a prompt that may have run it.
+---
+
+---
+**Date:** 2026-11-20
 **Trigger:** A long E2E chat failed to compact on Neon. A separate side chat marked a 3,115-token reasoning-only Neon turn complete with no final message.
 **Fix:** Route Codex compaction to Antigravity's ACP `/compact` command for the same native session. At a provider change or fork, seed a tool-free Neon checkpoint from the available Codex history. Return one compaction item and preserve any completed results the stopped native turn did not receive. Give a turn with neither text nor tool activity one continuation in the same session. If it still has no user-visible reply, return an error.
 **Guard:** Real subscription-backed tests recovered a unique token after an in-place Neon compact and after a checkpoint following a Claude marker. The bridge tests check response shape, session ownership and retention of tool output beyond the normal history excerpt. The adapter tests cover the reasoning-only continuation.

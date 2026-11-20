@@ -17,6 +17,7 @@ assert.equal(process.env.GEMINI_API_KEY, undefined);
 let promptId;
 let firstReasoningOnly = false;
 let compactedNativeHistory = false;
+let toolPromptAttempted = false;
 const scenario = process.env.FAKE_AGY_SCENARIO;
 const permissions = new Map([
   [101, [sid, 'mcp_codex_echo', 'temporary']],
@@ -36,6 +37,32 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     assert.equal(params.value, settings[params.configId]);
     reply(id, { configOptions: [{ id: params.configId, currentValue: params.value }] });
   } else if (method === 'session/prompt') {
+    if (scenario === 'denied-tool' || scenario === 'approved-tool') {
+      if (!toolPromptAttempted) {
+        toolPromptAttempted = true;
+        promptId = id;
+        const name = scenario === 'denied-tool' ? 'native_command' : 'mcp_codex_echo';
+        const toolCallId = 'permission-probe';
+        emit({
+          method: 'session/update',
+          params: { sessionId: sid, update: { sessionUpdate: 'tool_call', toolCallId, status: 'pending' } },
+        });
+        emit({
+          id: 201, method: 'session/request_permission',
+          params: { sessionId: sid, toolCall: { name, toolCallId }, options: [
+            { kind: 'allow_once', optionId: 'temporary' },
+            { kind: 'reject_once', optionId: 'decline' },
+          ] },
+        });
+      } else {
+        assert.equal(scenario, 'denied-tool', 'Never replay a prompt after an approved action');
+        assert.match(params.prompt[0].text, /tool request was declined/);
+        assert.match(params.prompt[0].text, /tools provided by Codex/);
+        update('agent_message_chunk', 'Recovered after a denied tool');
+        reply(id, { stopReason: 'end_turn' });
+      }
+      continue;
+    }
     if (scenario === 'compact') {
       if (params.prompt[0].text === '/compact') {
         compactedNativeHistory = true;
@@ -81,6 +108,9 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
         },
       });
     }
+  } else if (id === 201) {
+    assert.equal(result.outcome.optionId, scenario === 'denied-tool' ? 'decline' : 'temporary');
+    reply(promptId, { stopReason: 'end_turn' });
   } else {
     assert.equal(result.outcome.optionId, permissions.get(id)[2]);
     permissions.delete(id);

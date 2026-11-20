@@ -35,7 +35,7 @@ test('Antigravity models are opt-in, preserve the default routes and expose thei
   }
 });
 
-function runAdapter(scenario, overrides = {}) {
+function runAdapter(scenario, expectedStatus = 0) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-neon-'));
   const resume = 'agy-8ec454da-f0d0-48bf-b487-429d0d2005fa';
   try {
@@ -53,13 +53,13 @@ function runAdapter(scenario, overrides = {}) {
         model: neon.antigravityModel, effort: 'low', planMode: true, resume,
         system: 'system notes',
         content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'image-data' } }],
-        tools: ['echo'], mcpServers: [], ...overrides,
+        tools: ['echo'], mcpServers: [],
       }) + '\n',
       encoding: 'utf8',
       timeout: 10_000,
     });
     assert.equal(run.error, undefined);
-    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.equal(run.status, expectedStatus, run.stdout + run.stderr);
     return run.stdout.trim().split('\n').map(JSON.parse);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
@@ -81,6 +81,17 @@ test('Antigravity continues a reasoning-only turn once and sends the visible rep
   assert.deepEqual(events.filter((e) => e.event?.delta?.type === 'text_delta').map((e) => e.event.delta.text), ['Visible continuation']);
   assert.equal(events.at(-1).usage.input_tokens, 12);
   assert.equal(events.at(-1).usage.output_tokens, 4);
+});
+
+test('Antigravity continues a cancelled request when its only tool was denied', () => {
+  const events = runAdapter('denied-tool');
+  assert.deepEqual(events.filter((e) => e.event?.delta?.type === 'text_delta').map((e) => e.event.delta.text), ['Recovered after a denied tool']);
+});
+
+test('Antigravity reports an empty answer after an approved tool without replaying work', () => {
+  const events = runAdapter('approved-tool', 1);
+  assert.equal(events.at(-1).is_error, true);
+  assert.match(events.at(-1).result, /finished without a visible reply/);
 });
 
 test('Antigravity switches providers and then compacts the same native session with pending tool output', async () => {
