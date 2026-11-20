@@ -72,9 +72,10 @@ export function codexToolCatalog(tools) {
  * `onCall` receives each tool call; the call stays open until `reply` is called.
  */
 export class CodexToolServer {
-  constructor(catalog, onCall) {
+  constructor(catalog, onCall, { antigravity = false } = {}) {
     this.catalog = catalog;
     this.onCall = onCall;
+    this.antigravity = antigravity;
   }
 
   /** Starts listening and returns the socket path for the MCP proxy. */
@@ -116,10 +117,15 @@ export class CodexToolServer {
           send({ id, result: { content: [{ type: 'text', text: `Codex does not offer a tool named ${params?.name}.` }], isError: true } });
           return;
         }
+        const args = params.arguments || {};
+        // Antigravity attaches a UI-only summary even when the MCP schema has no such field.
+        if (this.antigravity && !Object.hasOwn(entry.mcpTool.inputSchema.properties || {}, 'toolSummary')) {
+          delete args.toolSummary;
+        }
         this.onCall({
           callId: rid('call_ccb_'),
           entry,
-          args: params.arguments || {},
+          args,
           toolUseId: params._meta?.['claudecode/toolUseId'],
           queuedAt: Date.now(),
           reply: (content) => send({ id, result: { content } }),
@@ -153,15 +159,17 @@ export function forgetCodexCalls(callIds) {
  * Finds a Claude turn waiting on tool results in this request's input.
  * @returns {{ turn: object, outputs: Map<string, unknown>, userText: string, userAttachments: object[] } | null}
  */
-export function findCodexResults(input, threadId) {
+export function findCodexResults(input, threadId, antigravity = false) {
   if (!Array.isArray(input)) return null;
+  const matches = (waiting) => Boolean(waiting?.turn.antigravity) === antigravity &&
+    (!threadId || waiting?.turn.threadId === threadId);
   let turn = null;
   let lastOutput = -1;
   const outputs = new Map();
   input.forEach((item, index) => {
     if (item?.type !== 'function_call_output' && item?.type !== 'custom_tool_call_output') return;
     const waiting = waitingCalls.get(item.call_id);
-    if (!waiting || (threadId && waiting.turn.threadId !== threadId)) return;
+    if (!waiting || !matches(waiting)) return;
     turn = waiting.turn;
     lastOutput = index;
     outputs.set(item.call_id, item.output);
@@ -169,7 +177,7 @@ export function findCodexResults(input, threadId) {
   if (!turn) {
     for (const [callId, waiting] of waitingCalls) {
       if (waiting.entry?.namespace !== 'collaboration' || waiting.entry.name !== 'wait_agent') continue;
-      if (threadId && waiting.turn.threadId !== threadId) continue; // A fork can inherit the marker but must never resume the parent's pending tool.
+      if (!matches(waiting)) continue; // A fork can inherit the marker but must never resume the parent's pending tool.
       if ([...waitingCalls.values()].some((other) => other.turn === waiting.turn && other !== waiting)) continue; // A mailbox wake must not fabricate results for another tool handed off alongside this wait.
       const waitIndex = input.findLastIndex((item) => item?.call_id === callId || (waiting.marker && item?.encrypted_content === waiting.marker)); // Codex can remove the preempted wait call entirely; its preceding session marker survives.
       const arrivals = input.slice(waitIndex + 1);

@@ -248,6 +248,29 @@ This is an explicit local opt-in: it overrides Codex's read-only and workspace p
 
 The bridge passes `--dangerously-skip-permissions` on both new and resumed turns. `-p` selects non-interactive print mode; it does not grant tool permissions by itself. With Claude Code 2.1.281, real bridge tests completed Write, Edit, and Bash operations outside the working directory without an interactive confirmation, including on a resumed session. The flag does not grant macOS privacy permissions or administrator access, and Claude's managed policies still apply. See the [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference).
 
+## Optional Gemini 4 Neon
+
+Install [Antigravity CLI](https://antigravity.google/docs/install/) and sign in to a Google account whose plan lists Gemini 4 Neon in `agy models`. The bridge uses that existing login through Antigravity's [Agent Client Protocol](https://antigravity.google/docs/ide/extensions/acp/). Leave Antigravity on its signed-in Google provider.
+
+Add this field to `~/.codex-claude-bridge/config.json` alongside your existing settings. Set `antigravityPath` only if `agy` lives outside `~/.local/bin/agy`.
+
+```json
+{
+  "antigravityModels": [
+    {
+      "slug": "gemini-4-neon",
+      "displayName": "Gemini 4 Neon",
+      "antigravityModel": "gemini-4-neon",
+      "contextWindow": 512000
+    }
+  ]
+}
+```
+
+On a fresh bridge process with this support, Codex lists **Gemini 4 Neon** with Low, Medium, High and Extra High reasoning. The [Model Bar](https://github.com/EthanSK/codex-model-bar) follows the same catalogue. Codex runs the tools it offers and applies its own approvals, while the bridge declines Antigravity's native permission requests. Each chat resumes its own Antigravity session. Side chats start a new session from the history supplied by Codex.
+
+Neon accepts embedded image attachments. Its Codex `/compact` action is currently unavailable. When an existing chat reaches its context limit, continue in a fresh chat.
+
 ## Troubleshooting
 
 - **The picker shrinks to GPT-5.5, Opus and Fable, or the current model says Custom.** Older Codex clients receive a different GPT catalogue from newer desktop clients. Earlier bridge versions kept one shared fallback, so an older client could replace the desktop's list during an upstream outage. The bridge now keeps successful catalogues separately by endpoint, request query (including client version) and account context. If no matching cached list exists, it returns a catalogue error instead of a successful incomplete list. Update/reload the bridge, then reopen the affected chat's picker after Codex refreshes its model list. A different client's success does not establish that this chat refreshed.

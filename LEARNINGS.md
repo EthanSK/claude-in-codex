@@ -23,6 +23,14 @@ Each entry looks like:
 
 (newest first)
 
+---
+**Date:** 2026-11-20
+**Trigger:** Ethan requested Gemini 4 Neon in the Codex Model Bar using his Google AI Pro login.
+**Symptom:** Antigravity could answer through its signed-in account, while the Codex bridge only advertised and routed Claude models locally.
+**Fix:** The opt-in Antigravity route uses ACP with Codex's existing tool handoff. ACP selects the base model and thought level separately, can load a saved session, and may add an undeclared `toolSummary` to MCP calls. The bridge removes that field only when the tool schema omits it. A provider-prefixed marker keeps Antigravity sessions out of Claude's resume and compaction paths.
+**Guard:** The desktop-bundled Codex CLI used the isolated bridge over WebSocket, called Codex's shell executor and returned the exact random token it read. A follow-up over HTTP recalled the same token with the saved session marker. Codex's `model/list` showed all four supported Neon efforts alongside the existing provider entries. The adapter fixture exercises session replay, image encoding, subscription environment and per-call approval.
+---
+
 
 ---
 **Date:** 2026-11-10

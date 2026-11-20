@@ -280,12 +280,20 @@ export function createBridge(initialConfig, state = new State()) {
       res.end(JSON.stringify({ error: previousResponseError(body.previous_response_id) }));
       return;
     }
-    const parsed = parseCodexRequest(body, (sid, turnId) => state.isLatestTurn(sid, turnId), (sid) => state.agentMessageIds(sid));
+    const threadId = requestThreadId(req.headers, body);
+    const antigravity = Boolean(modelCfg.antigravityModel);
+    const ownsSession = (sid) => {
+      const owner = state.ownerThread(sid);
+      return !owner || owner === threadId;
+    };
+    const sameProvider = (sid) => sid.startsWith('agy-') === antigravity;
+    const parsed = parseCodexRequest(body, (sid, turnId) =>
+      sameProvider(sid) && (!antigravity || ownsSession(sid)) && state.isLatestTurn(sid, turnId),
+    (sid) => state.agentMessageIds(sid));
     // Log request structure, never prompt text or credentials, when tracing missing side-chat context.
     log.debug(`Claude request shape ${JSON.stringify({ keys: Object.keys(body), inputCount: Array.isArray(body.input) ? body.input.length : 0, sandboxMode: parsed.sandboxMode, hasCwd: Boolean(parsed.cwd), hasResume: Boolean(parsed.resume) })}`);
     // Side chats / forked threads start from the parent's history: give them their own
     // fork of the parent's Claude session instead of taking over the parent's session.
-    const threadId = requestThreadId(req.headers, body);
     parsed.threadId = threadId;
     parsed.codexTurnId = String(req.headers['turn-id'] || req.headers['x-codex-turn-id'] || crypto.randomUUID());
     const owner = parsed.marker ? state.ownerThread(parsed.marker.sid) : null;
@@ -295,9 +303,13 @@ export function createBridge(initialConfig, state = new State()) {
     stream.begin();
 
     // Codex ran tools a waiting Claude turn asked for: that same Claude process continues in this response.
-    const results = findCodexResults(body.input, threadId);
+    const results = findCodexResults(body.input, threadId, antigravity);
     if (results && !parsed.hasCompactionTrigger) { // A compact request may contain the just-finished tool result; resuming normal work here gives Codex zero compaction items.
       results.turn.resume(stream, results);
+      return;
+    }
+    if (parsed.hasCompactionTrigger && (antigravity || (parsed.marker && !sameProvider(parsed.marker.sid)))) {
+      stream.fail('This bridge cannot compact this session through the selected model. Start a fresh Codex chat to continue.');
       return;
     }
     await cancelWaitingCodexTurns(threadId, parsed.hasCompactionTrigger ? 'compaction' : 'new-request');
@@ -643,7 +655,7 @@ if (isMain) {
   });
   server.listen(config.port, config.host, () => {
     log.info(`listening on http://${config.host}:${config.port}${BASE_PATH} → ${config.upstream}`);
-    log.info(`Claude models: ${config.models.map((m) => `${m.displayName} (${m.slug})`).join(', ')}`);
+    log.info(`Local models: ${config.models.map((m) => `${m.displayName} (${m.slug})`).join(', ')}`);
     startResourceMonitor({ log, state }); // Started only after a successful listen, so a failed second instance logs nothing extra.
   });
   // Reload after code updates: exit once idle and let launchd restart us with the new code.

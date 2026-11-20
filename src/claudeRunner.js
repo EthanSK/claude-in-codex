@@ -1,6 +1,8 @@
 // Runs native Claude turns and compaction, retaining sessions while Codex executes offered tools.
 import { spawn, execFile } from 'node:child_process';
 import os from 'node:os';
+import path from 'node:path';
+import { BRIDGE_HOME } from './config.js';
 import fs from 'node:fs';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -41,9 +43,9 @@ const CODEX_TOOLS_NOTE = [
  * The desktop app offers `request_user_input_async` (it only accepts the question; the answer arrives later as a user
  * message), while the CLI offers `request_user_input` (the answer is the tool result).
  */
-function codexQuestionsNote(questionTool) {
+function codexQuestionsNote(questionTool, prefix) {
   const lines = [
-    `You cannot show interactive permission prompts here. To ask the user for a decision, preference or clarification, call \`mcp__${CODEX_TOOLS_SERVER}__${questionTool.mcpTool.name}\` instead of asking in plain text: Codex shows it as a question card the user answers with a click. Prefer short multiple-choice options. If Codex refuses the tool, ask in plain text instead and end your turn.`, // Seen live: the CLI's request_user_input only works in Plan mode.
+    `You cannot show interactive permission prompts here. To ask the user for a decision, preference or clarification, call \`${prefix}${questionTool.mcpTool.name}\` instead of asking in plain text: Codex shows it as a question card the user answers with a click. Prefer short multiple-choice options. If Codex refuses the tool, ask in plain text instead and end your turn.`, // Seen live: the CLI's request_user_input only works in Plan mode.
   ];
   if (questionTool.name.endsWith('_async')) {
     lines.push('It returns `{"accepted":true}` straight away. The answer arrives later as a user message wrapped in `<send_user_message_question_reply>`, either attached to a later Codex tool result or as your next turn. Keep doing work that does not depend on the answer; if you cannot continue without it, say so and end your turn.');
@@ -136,11 +138,14 @@ function claudeEnvironment(threadId) {
 }
 
 /**
- * Runs one Claude Code turn and streams it into Codex.
+ * Runs one local provider turn and streams it into Codex.
  * @returns {Promise<void>}
  */
 export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, effort, userMessage, log, req, codexTools }) {
-  const caps = await claudeCapabilities(config.claudePath);
+  const antigravity = Boolean(modelCfg.antigravityModel);
+  const nativeModel = modelCfg.antigravityModel || modelCfg.claudeModel;
+  const engine = antigravity ? 'Antigravity' : 'Claude Code';
+  const caps = antigravity ? { ok: true } : await claudeCapabilities(config.claudePath);
   if (!caps.ok) {
     stream.textDelta(
       `Couldn't start Claude Code (\`${config.claudePath}\`). Check it's installed and logged in (\`claude auth login\`), then set \`claudePath\` in ~/.codex-claude-bridge/config.json if it isn't on PATH.`,
@@ -172,7 +177,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
   if (sessionLocks.has(lockKey)) log.info(`claude session ${lockKey} is busy; this turn waits for the running one`); // The "claude turn" line only appears once the wait ends.
   await withSessionLock(lockKey, async () => {
     if (stream.res.destroyed || stream.res.writableEnded) return; // A request stopped while queued must not start a paid turn or run tools after the previous turn releases this session.
-    const args = [
+    const args = antigravity ? [fileURLToPath(new URL('./antigravityAdapter.js', import.meta.url))] : [
       '-p',
       '--input-format',
       'stream-json',
@@ -180,14 +185,14 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       'stream-json',
       '--verbose',
       '--model',
-      modelCfg.claudeModel,
+      nativeModel,
       ...permissionArgs(permissionMode),
     ];
     if (caps.partial) args.push('--include-partial-messages');
     if (caps.permissionPrompts) args.push('--permission-prompts', 'none');
     const effortLevel = EFFORT[String(effort || '').toLowerCase()];
     if (caps.effort && effortLevel) args.push('--effort', effortLevel);
-    if (parsed.resume) args.push('--resume', parsed.resume.sid);
+    if (!antigravity && parsed.resume) args.push('--resume', parsed.resume.sid);
     if (parsed.fork) args.push('--fork-session');
     const skills = parsed.skills
       ? `The user's Codex skills are listed below. They are in addition to your own Claude Code skills. When a task matches one, read its SKILL.md with the Read tool and follow it, exactly as you would one of your own skills. When the user names a skill (e.g. $name), use it.\n\n${parsed.skills}`
@@ -195,12 +200,19 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     const catalog = codexToolCatalog(codexTools);
     const questionTool = catalog.get('request_user_input_async') ?? catalog.get('request_user_input'); // The desktop's async card works in every mode; the CLI's request_user_input is Plan-mode only.
     // Claude Code's own question tool has nowhere to appear in Codex, so Codex's question card replaces it.
-    if (questionTool) args.push('--disallowedTools', 'AskUserQuestion');
-    const questionsNote = questionTool ? codexQuestionsNote(questionTool) : PLAIN_TEXT_QUESTIONS_NOTE;
-    const system = [BRIDGE_NOTE, questionsNote, catalog.size ? CODEX_TOOLS_NOTE : '', config.extraSystemPrompt, ...parsed.agentsMd, skills, parsed.codexMemory]
+    if (!antigravity && questionTool) args.push('--disallowedTools', 'AskUserQuestion');
+    const toolPrefix = antigravity ? `mcp_${CODEX_TOOLS_SERVER}_` : `mcp__${CODEX_TOOLS_SERVER}__`;
+    const questionsNote = questionTool ? codexQuestionsNote(questionTool, toolPrefix) : PLAIN_TEXT_QUESTIONS_NOTE;
+    const bridgeInstructions = antigravity ? [
+      'You are Gemini running in Codex through Antigravity. Reply in Markdown and link local files with absolute paths.',
+      `The Codex workspace is ${cwd}. Your native working directory is separate from the Codex workspace.`,
+      'Use the offered Codex MCP tools for all file, shell and app actions. Codex applies the user’s permissions.',
+      parsed.planMode ? 'Codex is in Plan mode. Do not perform writes or other mutations, including through Codex tools.' : '',
+    ].filter(Boolean).join('\n') : BRIDGE_NOTE;
+    const system = [bridgeInstructions, questionsNote, !antigravity && catalog.size ? CODEX_TOOLS_NOTE : '', config.extraSystemPrompt, ...parsed.agentsMd, skills, parsed.codexMemory]
       .filter(Boolean)
       .join('\n\n');
-    args.push('--append-system-prompt', system);
+    if (!antigravity) args.push('--append-system-prompt', system);
     const mcpConfig = { mcpServers: {} };
     const env = claudeEnvironment(parsed.threadId);
     // Calls Claude makes to Codex's tools; each waits here until Codex returns its result.
@@ -210,24 +222,26 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       codexToolServer = new CodexToolServer(catalog, (call) => {
         queuedCodexCalls.push(call);
         scheduleCodexHandoff();
-      });
+      }, { antigravity });
       mcpConfig.mcpServers[CODEX_TOOLS_SERVER] = {
         command: process.execPath,
         args: [fileURLToPath(new URL('./codexToolsMcpProxy.js', import.meta.url))],
         env: { CODEX_CLAUDE_BRIDGE_TOOLS_SOCKET: await codexToolServer.listen() },
         timeout: CODEX_TOOL_TIMEOUT_MS, // Claude Code's separate 30-minute stdio idle timeout otherwise aborts silent Codex waits despite MCP_TOOL_TIMEOUT.
       };
-      // Codex runs its tools under its own approval policy, so Claude should not block them too. Plan mode keeps Claude's read-only rules.
-      if (permissionMode !== 'plan') args.push('--allowedTools', `mcp__${CODEX_TOOLS_SERVER}`);
-      // Codex's `exec` lists every nested tool in its description (about 17 KB); Claude Code otherwise cuts MCP descriptions at 2,048 characters.
-      const longestDescription = Math.max(...[...catalog.values()].map((entry) => entry.mcpTool.description.length));
-      env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH = String(Math.max(2048, longestDescription));
-      // A Codex tool can legitimately wait a long time, for example on the user's answer to a question.
-      env.MCP_TOOL_TIMEOUT = String(CODEX_TOOL_TIMEOUT_MS);
+      if (!antigravity) {
+        // Codex runs its own tools under its own approval policy. Plan mode also keeps Claude's read-only rules.
+        if (permissionMode !== 'plan') args.push('--allowedTools', `mcp__${CODEX_TOOLS_SERVER}`);
+        // Codex's `exec` lists every nested tool in its description (about 17 KB); Claude Code otherwise cuts MCP descriptions at 2,048 characters.
+        const longestDescription = Math.max(...[...catalog.values()].map((entry) => entry.mcpTool.description.length));
+        env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH = String(Math.max(2048, longestDescription));
+        // A Codex tool can legitimately wait a long time, for example on the user's answer to a question.
+        env.MCP_TOOL_TIMEOUT = String(CODEX_TOOL_TIMEOUT_MS);
+      }
     }
     // Codex's own executor already provides Computer Use with the right turn metadata, including the in-app browser; the direct proxy is the fallback.
     const codexRunsComputerUse = [...catalog.values()].some((entry) => entry.namespace === 'mcp__cua_repl');
-    if (config.codexComputerUseMcpConfig && !codexRunsComputerUse) {
+    if (!antigravity && config.codexComputerUseMcpConfig && !codexRunsComputerUse) {
       mcpConfig.mcpServers.cua_repl = {
         command: process.execPath,
         args: [fileURLToPath(new URL('./cuaMcpProxy.js', import.meta.url))],
@@ -239,25 +253,51 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
         },
       };
     }
-    if (Object.keys(mcpConfig.mcpServers).length) args.push('--mcp-config', JSON.stringify(mcpConfig));
-    if (catalog.size) log.info(`codex tools for claude: ${[...catalog.keys()].join(', ')}`); // Tool names only; shows which Codex surfaces this turn could reach.
+    if (!antigravity && Object.keys(mcpConfig.mcpServers).length) args.push('--mcp-config', JSON.stringify(mcpConfig));
+    if (catalog.size) log.info(`codex tools for ${engine}: ${[...catalog.keys()].join(', ')}`); // Tool names only; shows which Codex surfaces this turn could reach.
 
     log.info(
-      `claude turn model=${modelCfg.claudeModel} mode=${permissionMode} effort=${effortLevel || '-'} cwd=${cwd} ${
+      `${antigravity ? 'antigravity' : 'claude'} turn model=${nativeModel} mode=${permissionMode} effort=${effortLevel || '-'} cwd=${cwd} ${
         parsed.resume ? `${parsed.fork ? 'fork' : 'resume'}=${parsed.resume.sid}` : 'new-session'
       }`,
     );
 
     const nativeTurnId = rid('turn_'); // Correlates this native process's lifecycle lines and /health entry; never derived from prompt content.
     const session = parsed.resume ? (parsed.fork ? 'fork' : 'resume') : 'new';
-    const child = spawn(config.claudePath, args, {
-      cwd,
+    let nativeInput = userMessage;
+    let nativeCwd = cwd;
+    if (antigravity) {
+      nativeCwd = path.join(BRIDGE_HOME, 'antigravity-workspace');
+      try {
+        fs.mkdirSync(nativeCwd, { recursive: true, mode: 0o700 });
+      } catch (error) {
+        codexToolServer?.close();
+        stream.fail(`Could not create Antigravity's workspace (${error.code}).`);
+        return;
+      }
+      nativeInput = {
+        agy: config.antigravityPath,
+        model: nativeModel,
+        effort: effortLevel || modelCfg.defaultEffort || 'high',
+        resume: parsed.resume?.sid,
+        planMode: parsed.planMode,
+        system,
+        content: userMessage.message.content,
+        tools: [...catalog.keys()],
+        mcpServers: Object.entries(mcpConfig.mcpServers).map(([name, server]) => ({
+          name, command: server.command, args: server.args,
+          env: Object.entries(server.env).map(([name, value]) => ({ name, value })),
+        })),
+      };
+    }
+    const child = spawn(antigravity ? process.execPath : config.claudePath, args, {
+      cwd: nativeCwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const exited = new Promise((resolve) => child.on('close', resolve));
-    diagnostics.processStarted({ id: nativeTurnId, kind: 'turn', threadId: parsed.threadId, codexTurnId: parsed.codexTurnId, pid: child.pid, model: modelCfg.claudeModel, session });
-    logLifecycle(log, 'spawn', { turn: nativeTurnId, thread: parsed.threadId, codexTurn: parsed.codexTurnId, pid: child.pid, model: modelCfg.claudeModel, session, codexTools: catalog.size });
+    diagnostics.processStarted({ id: nativeTurnId, kind: 'turn', threadId: parsed.threadId, codexTurnId: parsed.codexTurnId, pid: child.pid, model: nativeModel, session });
+    logLifecycle(log, 'spawn', { turn: nativeTurnId, thread: parsed.threadId, codexTurn: parsed.codexTurnId, pid: child.pid, model: nativeModel, session, codexTools: catalog.size });
     const stopper = stopperFor(child, config, log, nativeTurnId);
     closeStdioAfterExit(child, STDIO_CLOSE_GRACE_MS, () => {
       diagnostics.processStdioForced(nativeTurnId);
@@ -278,7 +318,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     };
     const onClientGone = () => {
       if (finished) return;
-      log.info('codex closed the stream; stopping claude');
+      log.info(`codex closed the stream; stopping ${engine}`);
       stopClaude('client-gone');
     };
     // res 'close' fires on normal finish too; only act if we hadn't finished writing.
@@ -291,7 +331,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     const keepAlive = setInterval(() => stream?.keepAlive(), config.keepAliveSeconds * 1000);
 
     child.stdin.on('error', () => {});
-    child.stdin.end(`${JSON.stringify(userMessage)}\n`);
+    child.stdin.end(`${JSON.stringify(nativeInput)}\n`);
 
     let stderr = '';
     child.stderr.on('data', (d) => {
@@ -309,7 +349,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       plan: null,
       lastUsage: null,
       result: null,
-      model: modelCfg.claudeModel,
+      model: nativeModel,
     };
 
     // While Codex runs a tool there is no open response (`stream` is null); keep Claude's events for the next one.
@@ -343,6 +383,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     const turn = {
       id: nativeTurnId,
       threadId: parsed.threadId,
+      antigravity,
       agentMessageIds: new Set(parsed.agentMessageIds),
       // Codex sent the results: continue this same Claude process in Codex's new response.
       resume(nextStream, { outputs, userText, userAttachments, agentMessageIds }) {
@@ -384,7 +425,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     }
     function handOffCodexCalls() {
       handoffTimer = null;
-      if (!stream || !queuedCodexCalls.length) return;
+      if (!stream || !queuedCodexCalls.length || (antigravity && stream.res.destroyed)) return;
       // Wait (up to a second) until the stdout event naming each call is handled, so its preceding text lands in this response.
       const unseen = queuedCodexCalls.some((call) => call.toolUseId && !ctx.tools.has(call.toolUseId));
       if (unseen && Date.now() - queuedCodexCalls[0].queuedAt < 1000) {
@@ -428,9 +469,15 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     forgetCodexCalls(waiting.keys());
     codexToolServer?.close();
 
-    if (!stream || stream.closed) return;
+    if (!stream || stream.closed || (antigravity && stream.res.destroyed)) return;
 
     const r = ctx.result;
+    if (antigravity && (!r || r.is_error)) {
+      const reason = r?.result || `Process exited with code ${exitCode}.`;
+      log.error(`antigravity failed: ${reason}`);
+      stream.fail(`Antigravity stopped. ${reason}`);
+      return;
+    }
     if (ctx.plan) {
       stream.closeOpen('commentary');
       stream.textDelta(`<proposed_plan>\n${ctx.plan.trim()}\n</proposed_plan>`);

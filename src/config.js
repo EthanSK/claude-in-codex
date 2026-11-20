@@ -22,12 +22,21 @@ function readUserConfig() {
 }
 
 function modelsFromConfig(user) {
-  const models = user.models === undefined ? JSON.parse(fs.readFileSync(new URL('./models.json', import.meta.url), 'utf8')) : user.models;
+  const configured = user.models === undefined ? JSON.parse(fs.readFileSync(new URL('./models.json', import.meta.url), 'utf8')) : user.models;
+  const antigravityModels = user.antigravityModels === undefined ? [] : user.antigravityModels;
+  if (!Array.isArray(configured) || !Array.isArray(antigravityModels)) throw new Error('Expected a model list');
+  const models = [...configured, ...antigravityModels];
   const slugs = new Set();
-  if (!Array.isArray(models)) throw new Error('Expected a model list');
   for (const model of models) {
-    if (!model || ['slug', 'displayName', 'claudeModel'].some((key) => typeof model[key] !== 'string' || !model[key].trim()) || slugs.has(model.slug)) {
-      throw new Error('Each model needs a unique slug, displayName and claudeModel');
+    if (!model || ['slug', 'displayName'].some((key) => typeof model[key] !== 'string' || !model[key].trim()) || slugs.has(model.slug)) {
+      throw new Error('Each model needs a unique slug and displayName');
+    }
+    const providers = ['claudeModel', 'antigravityModel'].filter((key) => model[key] !== undefined);
+    if (providers.length !== 1 || typeof model[providers[0]] !== 'string' || !model[providers[0]].trim()) {
+      throw new Error('Each model needs exactly one claudeModel or antigravityModel');
+    }
+    if (model.antigravityModel && model.defaultEffort && !['low', 'medium', 'high', 'xhigh'].includes(model.defaultEffort)) {
+      throw new Error('Antigravity defaultEffort must be low, medium, high or xhigh');
     }
     if (model.hidden !== undefined && typeof model.hidden !== 'boolean') throw new Error('Model hidden must be a boolean');
     slugs.add(model.slug);
@@ -80,7 +89,8 @@ export const DEFAULTS = {
   upstream: 'https://chatgpt.com/backend-api/codex',
   // Absolute path is best when running under launchd (PATH is minimal there).
   claudePath: 'claude',
-  // Models added to Codex's picker. `claudeModel` is passed to `claude --model`.
+  antigravityPath: path.join(os.homedir(), '.local', 'bin', 'agy'),
+  // Models added to Codex's picker. Provider model IDs are kept separate from picker slugs.
   // Every displayName includes the model version (e.g. "Fable 5.2", not "Fable"), so
   // the picker always shows exactly which model a chat runs on.
   models: modelsFromConfig({}), // JSON data can change during use; keep older entries there for chats that must survive future service restarts too.

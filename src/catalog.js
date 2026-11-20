@@ -34,7 +34,7 @@ export function claudeEntries(config, state, template, maxPriority = 0) {
       display_name: m.displayName,
       description: m.description,
       default_reasoning_level: m.defaultEffort || 'high',
-      supported_reasoning_levels: EFFORT_LEVELS,
+      supported_reasoning_levels: m.antigravityModel ? EFFORT_LEVELS.slice(0, 4) : EFFORT_LEVELS,
       visibility: m.hidden ? 'hide' : 'list', // Retired versions still route existing chats without keeping an old button in the picker or bar.
       supported_in_api: true,
       priority: (m.priority ?? maxPriority + 1 + i),
@@ -46,6 +46,7 @@ export function claudeEntries(config, state, template, maxPriority = 0) {
       max_context_window: contextWindow,
       input_modalities: ['text', 'image'],
       supports_reasoning_effort_updates: false,
+      ...(m.antigravityModel ? { shell_type: 'shell_command' } : {}),
       // Classic request shape (tools in `tools`, prompt in `instructions`), not responses-lite.
       use_responses_lite: false,
     });
