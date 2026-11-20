@@ -269,7 +269,7 @@ Add this field to `~/.codex-claude-bridge/config.json` alongside your existing s
 
 On a fresh bridge process with this support, Codex lists **Gemini 4 Neon** with Low, Medium, High and Extra High reasoning. The [Model Bar](https://github.com/EthanSK/codex-model-bar) follows the same catalogue. Codex runs the tools it offers and applies its own approvals, while the bridge declines Antigravity's native permission requests. Each chat resumes its own Antigravity session. Side chats start a new session from the history supplied by Codex.
 
-Neon accepts embedded image attachments. Its Codex `/compact` action is currently unavailable. When an existing chat reaches its context limit, continue in a fresh chat.
+Neon accepts embedded image attachments and supports Codex compaction. The bridge asks Antigravity to compact an existing Neon session. On a model switch or fork, it starts a Neon session with a checkpoint of the conversation history Codex supplies. It preserves completed tool results awaiting delivery in the checkpoint and does not execute the pending user request during compaction.
 
 ## Troubleshooting
 

@@ -141,7 +141,7 @@ function claudeEnvironment(threadId) {
  * Runs one local provider turn and streams it into Codex.
  * @returns {Promise<void>}
  */
-export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, effort, userMessage, log, req, codexTools }) {
+export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, effort, userMessage, log, req, codexTools, compact = false }) {
   const antigravity = Boolean(modelCfg.antigravityModel);
   const nativeModel = modelCfg.antigravityModel || modelCfg.claudeModel;
   const engine = antigravity ? 'Antigravity' : 'Claude Code';
@@ -155,7 +155,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     return;
   }
 
-  const permissionMode = parsed.planMode
+  const permissionMode = (compact || parsed.planMode)
     ? 'plan'
     : config.permissionModes[parsed.sandboxMode] || config.defaultPermissionMode;
   let cwd = parsed.cwd && fs.existsSync(parsed.cwd) ? parsed.cwd : os.homedir();
@@ -262,7 +262,8 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       }`,
     );
 
-    const nativeTurnId = rid('turn_'); // Correlates this native process's lifecycle lines and /health entry; never derived from prompt content.
+    const kind = compact ? 'compact' : 'turn';
+    const nativeTurnId = rid(compact ? 'compact_' : 'turn_'); // Correlates this native process's lifecycle lines and /health entry; never derived from prompt content.
     const session = parsed.resume ? (parsed.fork ? 'fork' : 'resume') : 'new';
     let nativeInput = userMessage;
     let nativeCwd = cwd;
@@ -280,7 +281,8 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
         model: nativeModel,
         effort: effortLevel || modelCfg.defaultEffort || 'high',
         resume: parsed.resume?.sid,
-        planMode: parsed.planMode,
+        planMode: compact || parsed.planMode,
+        compact,
         system,
         content: userMessage.message.content,
         tools: [...catalog.keys()],
@@ -296,8 +298,8 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const exited = new Promise((resolve) => child.on('close', resolve));
-    diagnostics.processStarted({ id: nativeTurnId, kind: 'turn', threadId: parsed.threadId, codexTurnId: parsed.codexTurnId, pid: child.pid, model: nativeModel, session });
-    logLifecycle(log, 'spawn', { turn: nativeTurnId, thread: parsed.threadId, codexTurn: parsed.codexTurnId, pid: child.pid, model: nativeModel, session, codexTools: catalog.size });
+    diagnostics.processStarted({ id: nativeTurnId, kind, threadId: parsed.threadId, codexTurnId: parsed.codexTurnId, pid: child.pid, model: nativeModel, session });
+    logLifecycle(log, 'spawn', { turn: nativeTurnId, ...(compact ? { kind } : {}), thread: parsed.threadId, codexTurn: parsed.codexTurnId, pid: child.pid, model: nativeModel, session, codexTools: catalog.size });
     const stopper = stopperFor(child, config, log, nativeTurnId);
     closeStdioAfterExit(child, STDIO_CLOSE_GRACE_MS, () => {
       diagnostics.processStdioForced(nativeTurnId);
@@ -355,6 +357,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     // While Codex runs a tool there is no open response (`stream` is null); keep Claude's events for the next one.
     const heldEvents = [];
     const handle = (ev) => {
+      if (compact && !['system', 'assistant', 'result'].includes(ev.type)) return;
       if (!stream) {
         heldEvents.push(ev);
         return;
@@ -476,6 +479,17 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       const reason = r?.result || `Process exited with code ${exitCode}.`;
       log.error(`antigravity failed: ${reason}`);
       stream.fail(`Antigravity stopped. ${reason}`);
+      return;
+    }
+    if (compact) {
+      if (!r.session_id || exitCode !== 0) {
+        stream.fail('Antigravity compaction did not return a resumable session.');
+        return;
+      }
+      const turnId = rid('t');
+      stream.compaction(makeMarker(ctx.sid, turnId));
+      state.recordTurn(ctx.sid, turnId, parsed.threadId, [...turn.agentMessageIds]);
+      stream.complete(usageSoFar(ctx, r?.usage?.output_tokens));
       return;
     }
     if (ctx.plan) {

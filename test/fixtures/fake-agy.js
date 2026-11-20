@@ -14,6 +14,8 @@ assert.deepEqual(process.argv.slice(2), ['acp', '--include-default-customization
 assert.equal(process.env.GEMINI_API_KEY, undefined);
 
 let promptId;
+let firstReasoningOnly = false;
+const scenario = process.env.FAKE_AGY_SCENARIO;
 const permissions = new Map([
   [101, [sid, 'mcp_codex_echo', 'temporary']],
   [102, ['wrong-session', 'mcp_codex_echo', 'decline']],
@@ -22,6 +24,7 @@ const permissions = new Map([
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const { id, method, params, result } = JSON.parse(line);
   if (method === 'initialize') reply(id, { protocolVersion: 1 });
+  else if (method === 'session/new' && scenario === 'compact') reply(id, { sessionId: sid });
   else if (method === 'session/load') {
     assert.equal(params.sessionId, sid);
     update('agent_message_chunk', 'Old replayed history');
@@ -31,6 +34,25 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     assert.equal(params.value, settings[params.configId]);
     reply(id, { configOptions: [{ id: params.configId, currentValue: params.value }] });
   } else if (method === 'session/prompt') {
+    if (scenario === 'compact') {
+      assert.match(params.prompt[0].text, /prepare context for the next turn/);
+      assert.match(params.prompt[1].text, /checkpoint-token-389/);
+      update('agent_message_chunk', 'Checkpoint must stay inside Antigravity');
+      reply(id, { stopReason: 'end_turn' });
+      continue;
+    }
+    if (scenario === 'reasoning-only') {
+      if (!firstReasoningOnly) {
+        firstReasoningOnly = true;
+        update('agent_thought_chunk', 'First turn ended without an answer');
+        reply(id, { stopReason: 'max_tokens', usage: { inputTokens: 10, outputTokens: 3 } });
+      } else {
+        assert.match(params.prompt[0].text, /Finish answering the previous user request/);
+        update('agent_message_chunk', 'Visible continuation');
+        reply(id, { stopReason: 'end_turn', usage: { inputTokens: 2, outputTokens: 1 } });
+      }
+      continue;
+    }
     assert.deepEqual(params.prompt, [
       { type: 'text', text: 'system notes' },
       { type: 'image', mimeType: 'image/png', data: 'image-data' },

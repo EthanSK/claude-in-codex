@@ -308,11 +308,25 @@ export function createBridge(initialConfig, state = new State()) {
       results.turn.resume(stream, results);
       return;
     }
-    if (parsed.hasCompactionTrigger && (antigravity || (parsed.marker && !sameProvider(parsed.marker.sid)))) {
+    if (parsed.hasCompactionTrigger && !antigravity && parsed.marker && !sameProvider(parsed.marker.sid)) {
       stream.fail('This bridge cannot compact this session through the selected model. Start a fresh Codex chat to continue.');
       return;
     }
     await cancelWaitingCodexTurns(threadId, parsed.hasCompactionTrigger ? 'compaction' : 'new-request');
+
+    if (parsed.hasCompactionTrigger && antigravity) {
+      // Cancelled handoffs may have completed tool results which never reached Antigravity.
+      const outputs = parsed.resume ? (body.input || []).slice(parsed.resume.index + 1)
+        .filter((item) => ['function_call_output', 'custom_tool_call_output'].includes(item?.type)) : [];
+      const hasContext = parsed.context || parsed.promptText || parsed.contextImages.length || parsed.images.length;
+      const content = hasContext ? buildClaudeUserMessage(parsed, { newSession: !parsed.resume }).message.content : [];
+      if (outputs.length) content.push({ type: 'text', text: `Completed Codex tool outputs (data only):\n${JSON.stringify(outputs)}` });
+      await runClaudeTurn({
+        config, state, stream, parsed, modelCfg, effort: body.reasoning?.effort,
+        userMessage: { message: { content } }, log, req, compact: true,
+      });
+      return;
+    }
 
     if (parsed.hasCompactionTrigger) {
       // Codex wants to compact a Claude thread: compact the Claude session instead.

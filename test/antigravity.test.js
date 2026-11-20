@@ -3,21 +3,23 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const neon = {
   slug: 'gemini-4-neon', displayName: 'Gemini 4 Neon', antigravityModel: 'gemini-4-neon',
 };
 
+const bridgeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-neon-config-'));
+process.env.CODEX_CLAUDE_BRIDGE_HOME = bridgeHome;
+after(() => fs.rmSync(bridgeHome, { recursive: true, force: true }));
+
 test('Antigravity models are opt-in, preserve the default routes and expose their supported settings', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-neon-config-'));
-  process.env.CODEX_CLAUDE_BRIDGE_HOME = home;
+  const { loadModels } = await import('../src/config.js');
+  const { mergeCatalog } = await import('../src/catalog.js');
+  const defaults = loadModels();
+  const file = path.join(bridgeHome, 'config.json');
   try {
-    const { loadModels } = await import('../src/config.js');
-    const { mergeCatalog } = await import('../src/catalog.js');
-    const defaults = loadModels();
-    const file = path.join(home, 'config.json');
     fs.writeFileSync(file, JSON.stringify({ antigravityModels: [neon] }));
     assert.deepEqual(loadModels(), [...defaults, neon]);
     const catalog = mergeCatalog({ models: loadModels() }, { contextWindow: () => null }, []);
@@ -29,11 +31,11 @@ test('Antigravity models are opt-in, preserve the default routes and expose thei
     fs.writeFileSync(file, JSON.stringify({ antigravityModels: [{ ...neon, claudeModel: 'opus' }] }));
     assert.throws(loadModels, /exactly one claudeModel or antigravityModel/);
   } finally {
-    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(file, { force: true });
   }
 });
 
-test('Antigravity resumes without replay, maps attachments and grants only current Codex tools once', () => {
+function runAdapter(scenario, overrides = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ccb-neon-'));
   const resume = 'agy-8ec454da-f0d0-48bf-b487-429d0d2005fa';
   try {
@@ -44,27 +46,86 @@ test('Antigravity resumes without replay, maps attachments and grants only curre
         PATH: [path.dirname(process.execPath), process.env.PATH].join(path.delimiter),
         HOME: home,
         GEMINI_API_KEY: 'sentinel',
+        FAKE_AGY_SCENARIO: scenario,
       },
       input: JSON.stringify({
         agy: fileURLToPath(new URL('./fixtures/fake-agy.js', import.meta.url)),
         model: neon.antigravityModel, effort: 'low', planMode: true, resume,
         system: 'system notes',
         content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'image-data' } }],
-        tools: ['echo'], mcpServers: [],
+        tools: ['echo'], mcpServers: [], ...overrides,
       }) + '\n',
       encoding: 'utf8',
       timeout: 10_000,
     });
     assert.equal(run.error, undefined);
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    const events = run.stdout.trim().split('\n').map(JSON.parse);
-    assert.deepEqual(events.filter((e) => e.type === 'stream_event').map((e) => e.event.delta), [
+    return run.stdout.trim().split('\n').map(JSON.parse);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test('Antigravity resumes without replay, maps attachments and grants only current Codex tools once', () => {
+  const events = runAdapter('');
+  assert.deepEqual(events.filter((e) => e.type === 'stream_event').map((e) => e.event.delta), [
       { type: 'thinking_delta', thinking: 'Thinking' },
       { type: 'text_delta', text: 'Verified' },
     ]);
-    assert.equal(events.at(-1).session_id, resume);
-    assert.equal(events.at(-1).usage.output_tokens, 7);
+  assert.equal(events.at(-1).session_id, 'agy-8ec454da-f0d0-48bf-b487-429d0d2005fa');
+  assert.equal(events.at(-1).usage.output_tokens, 7);
+});
+
+test('Antigravity continues a reasoning-only turn once and sends the visible reply', () => {
+  const events = runAdapter('reasoning-only');
+  assert.deepEqual(events.filter((e) => e.event?.delta?.type === 'text_delta').map((e) => e.event.delta.text), ['Visible continuation']);
+  assert.equal(events.at(-1).usage.input_tokens, 12);
+  assert.equal(events.at(-1).usage.output_tokens, 4);
+});
+
+test('Antigravity creates a private checkpoint when Codex switches providers before compaction', async () => {
+  const { createBridge } = await import('../src/server.js');
+  const { DEFAULTS } = await import('../src/config.js');
+  const { State } = await import('../src/state.js');
+  const state = new State(path.join(bridgeHome, 'state.json'));
+  const vars = ['FAKE_AGY_SCENARIO', 'HOME', 'PATH'];
+  const envBefore = vars.map((key) => [key, process.env[key]]);
+  process.env.FAKE_AGY_SCENARIO = 'compact';
+  process.env.HOME = bridgeHome;
+  process.env.PATH = [path.dirname(process.execPath), process.env.PATH].join(path.delimiter);
+  const { server } = createBridge({
+    ...DEFAULTS, models: [neon], logLevel: 'error',
+    antigravityPath: fileURLToPath(new URL('./fixtures/fake-agy.js', import.meta.url)),
+  }, state);
+  try {
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/backend-api/codex/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'thread-id': 'checkpoint-thread' },
+      body: JSON.stringify({
+        model: neon.slug, reasoning: { effort: 'low' },
+        input: [
+          { type: 'compaction', encrypted_content: 'ccb:v1:claude-session:previous-turn' },
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Remember checkpoint-token-389.' }] },
+          { type: 'compaction_trigger' },
+        ],
+      }),
+    });
+    const data = await res.text();
+    const events = data.split('\n').filter((line) => line.startsWith('data: {')).map((line) => JSON.parse(line.slice(6)));
+    const response = events.find((e) => e.type === 'response.completed')?.response;
+    assert.ok(response, data);
+    assert.deepEqual(response.output.map(({ type }) => type), ['compaction']);
+    const sid = response.output[0].encrypted_content.split(':')[2];
+    assert.match(sid, /^agy-/);
+    assert.equal(state.ownerThread(sid), 'checkpoint-thread');
+    assert.equal(state.ownerThread('claude-session'), null);
   } finally {
-    fs.rmSync(home, { recursive: true, force: true });
+    await new Promise((resolve) => server.close(resolve));
+    for (const [key, value] of envBefore) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    state.flush();
   }
 });
