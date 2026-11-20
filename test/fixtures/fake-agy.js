@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import readline from 'node:readline';
+import fs from 'node:fs';
 
 const sid = '8ec454da-f0d0-48bf-b487-429d0d2005fa';
 const emit = (data) => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...data })}\n`);
@@ -15,6 +16,7 @@ assert.equal(process.env.GEMINI_API_KEY, undefined);
 
 let promptId;
 let firstReasoningOnly = false;
+let compactedNativeHistory = false;
 const scenario = process.env.FAKE_AGY_SCENARIO;
 const permissions = new Map([
   [101, [sid, 'mcp_codex_echo', 'temporary']],
@@ -35,9 +37,18 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     reply(id, { configOptions: [{ id: params.configId, currentValue: params.value }] });
   } else if (method === 'session/prompt') {
     if (scenario === 'compact') {
-      assert.match(params.prompt[0].text, /prepare context for the next turn/);
-      assert.match(params.prompt[1].text, /checkpoint-token-389/);
-      update('agent_message_chunk', 'Checkpoint must stay inside Antigravity');
+      if (params.prompt[0].text === '/compact') {
+        compactedNativeHistory = true;
+      } else {
+        assert.match(params.prompt[0].text, /prepare context for the next turn/);
+        if (compactedNativeHistory) {
+          assert.match(params.prompt.at(-1).text, /finished-tool-token-179/);
+          fs.writeFileSync('tool-output-received', 'finished-tool-token-179');
+        } else {
+          assert.match(params.prompt[1].text, /checkpoint-token-389/);
+        }
+        update('agent_message_chunk', 'Checkpoint must stay inside Antigravity');
+      }
       reply(id, { stopReason: 'end_turn' });
       continue;
     }

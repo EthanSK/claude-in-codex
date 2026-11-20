@@ -27,7 +27,7 @@ Each entry looks like:
 **Date:** 2026-11-20
 **Trigger:** A long E2E chat failed to compact on Neon. A separate side chat marked a 3,115-token reasoning-only Neon turn complete with no final message.
 **Fix:** Route Codex compaction to Antigravity's ACP `/compact` command for the same native session. At a provider change or fork, seed a tool-free Neon checkpoint from the available Codex history. Return one compaction item and preserve any completed results the stopped native turn did not receive. Give a turn with neither text nor tool activity one continuation in the same session. If it still has no user-visible reply, return an error.
-**Guard:** Real subscription-backed tests recovered a unique token after an in-place Neon compact and after a checkpoint following a Claude marker. The bridge tests check response shape and session ownership, and the adapter tests cover the reasoning-only continuation.
+**Guard:** Real subscription-backed tests recovered a unique token after an in-place Neon compact and after a checkpoint following a Claude marker. The bridge tests check response shape, session ownership and retention of tool output beyond the normal history excerpt. The adapter tests cover the reasoning-only continuation.
 ---
 
 ---

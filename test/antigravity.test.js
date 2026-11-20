@@ -83,7 +83,7 @@ test('Antigravity continues a reasoning-only turn once and sends the visible rep
   assert.equal(events.at(-1).usage.output_tokens, 4);
 });
 
-test('Antigravity creates a private checkpoint when Codex switches providers before compaction', async () => {
+test('Antigravity switches providers and then compacts the same native session with pending tool output', async () => {
   const { createBridge } = await import('../src/server.js');
   const { DEFAULTS } = await import('../src/config.js');
   const { State } = await import('../src/state.js');
@@ -99,27 +99,34 @@ test('Antigravity creates a private checkpoint when Codex switches providers bef
   }, state);
   try {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/backend-api/codex/responses`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'thread-id': 'checkpoint-thread' },
-      body: JSON.stringify({
-        model: neon.slug, reasoning: { effort: 'low' },
-        input: [
-          { type: 'compaction', encrypted_content: 'ccb:v1:claude-session:previous-turn' },
-          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Remember checkpoint-token-389.' }] },
-          { type: 'compaction_trigger' },
-        ],
-      }),
-    });
-    const data = await res.text();
-    const events = data.split('\n').filter((line) => line.startsWith('data: {')).map((line) => JSON.parse(line.slice(6)));
-    const response = events.find((e) => e.type === 'response.completed')?.response;
-    assert.ok(response, data);
-    assert.deepEqual(response.output.map(({ type }) => type), ['compaction']);
+    async function compact(input) {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/backend-api/codex/responses`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'thread-id': 'checkpoint-thread' },
+        body: JSON.stringify({ model: neon.slug, reasoning: { effort: 'low' }, input: [...input, { type: 'compaction_trigger' }] }),
+      });
+      const data = await res.text();
+      const events = data.split('\n').filter((line) => line.startsWith('data: {')).map((line) => JSON.parse(line.slice(6)));
+      const response = events.find((e) => e.type === 'response.completed')?.response;
+      assert.ok(response, data);
+      assert.deepEqual(response.output.map(({ type }) => type), ['compaction']);
+      return response;
+    }
+    const response = await compact([
+      { type: 'compaction', encrypted_content: 'ccb:v1:claude-session:previous-turn' },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Remember checkpoint-token-389.' }] },
+    ]);
     const sid = response.output[0].encrypted_content.split(':')[2];
     assert.match(sid, /^agy-/);
     assert.equal(state.ownerThread(sid), 'checkpoint-thread');
     assert.equal(state.ownerThread('claude-session'), null);
+    const resumed = await compact([
+      response.output[0],
+      { type: 'function_call_output', call_id: 'last-call', output: `${'x'.repeat(12_000)}finished-tool-token-179` },
+    ]);
+    assert.equal(resumed.output[0].encrypted_content.split(':')[2], sid);
+    assert.notEqual(resumed.output[0].encrypted_content, response.output[0].encrypted_content);
+    assert.equal(fs.readFileSync(path.join(bridgeHome, 'antigravity-workspace', 'tool-output-received'), 'utf8'), 'finished-tool-token-179');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     for (const [key, value] of envBefore) {
