@@ -23,6 +23,15 @@ Each entry looks like:
 
 (newest first)
 
+
+---
+**Date:** 2026-11-22
+**Trigger:** A Claude follow-up after Stop could lose the native session inside the same Codex chat. Ethan also asked how to help Gemini find its Codex tools.
+**Root cause:** While the response stream dropped writes after disconnect, the runner could still record the unsent marker as the latest one. The client's last visible marker then no longer matched. Separately, Neon received a shell hint and tool definitions with little guidance for broader Codex functions.
+**Fix:** Share the response's existing sendability check with the runner's tool handoff and completion and with Claude compaction. A closed reply cannot advance the session marker. Give Neon short suggestions based on tool routes present in the current catalogue. The instructions preserve Codex's tool approvals and delegation rules.
+**Guard:** Local HTTP and WebSocket clients interrupt a fake Claude turn, then prove the next request resumes the same session and passes through the new user request. A real Claude Max stream interrupted in an isolated bridge also resumed the same session and recalled the fixture word. The guidance test checks that omitted tools and discovery mechanisms are omitted from the suggestions. Antigravity's measured setup was spent mainly starting or loading its session. Redundant model and effort selections took only a few milliseconds in the probe.
+---
+
 ---
 **Date:** 2026-11-20
 **Trigger:** The Live update banner chat failed after compaction even on the current Antigravity CLI.

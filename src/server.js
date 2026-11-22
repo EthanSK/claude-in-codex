@@ -57,18 +57,18 @@ class WebSocketResponse extends EventEmitter {
     this.onCompleted = onCompleted;
     this.writableEnded = false;
     this.writableFinished = false;
-    this.destroyed = false;
-    this.onSocketClose = () => {
-      this.destroyed = true;
-      this.emit('close');
-    };
+    this.onSocketClose = () => this.emit('close');
     socket.on('close', this.onSocketClose);
+  }
+
+  get destroyed() {
+    return this.socket.readyState !== WebSocket.OPEN;
   }
 
   writeHead() {}
 
   write(event) {
-    if (this.destroyed || this.writableEnded || this.socket.readyState !== WebSocket.OPEN) return false;
+    if (this.destroyed || this.writableEnded) return false;
     const data = String(event).split('\n').find((line) => line.startsWith('data: '));
     if (data) {
       const json = data.slice(6);
@@ -344,6 +344,7 @@ export function createBridge(initialConfig, state = new State()) {
         }
         newSid = r.sessionId;
       }
+      if (!stream.canSend) return; // A disconnected compact cannot replace Codex's last delivered session marker.
       const turnId = rid('t');
       stream.compaction(newSid ? makeMarker(newSid, turnId) : 'ccb:v1:none:none');
       if (newSid) state.recordTurn(newSid, turnId, parsed.threadId, state.agentMessageIds(sid)); // Compaction does not deliver new messages, and a fork inherits only IDs already received by its parent.

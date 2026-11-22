@@ -1,7 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findCodexResults, waitForCodexResults, forgetCodexCalls, waitingCodexTurnsReferencedBy, waitingCodexTurns } from '../src/codexTools.js';
+import { antigravityToolSuggestions, codexToolCatalog, findCodexResults, waitForCodexResults, forgetCodexCalls, waitingCodexTurnsReferencedBy, waitingCodexTurns } from '../src/codexTools.js';
 import { chatDelivery } from './fixtures/codex-delegation.js';
+
+test('Gemini tool suggestions name only the Codex tools offered for the turn', () => {
+  const catalog = codexToolCatalog([
+    { type: 'custom', name: 'exec', description: 'Discover nested tools with ALL_TOOLS.' },
+    { type: 'namespace', name: 'mcp__cua_repl', tools: [{ type: 'function', name: 'js' }] },
+    { type: 'namespace', name: 'collaboration', tools: [{ type: 'function', name: 'list_agents' }] },
+  ]);
+  const prefix = 'mcp_codex_';
+  const toolNames = (tools) => antigravityToolSuggestions(tools, prefix).join(' ').match(/mcp_codex_\w+/g);
+  assert.deepEqual(toolNames(catalog), ['mcp_codex_exec', 'mcp_codex_cua_repl__js', 'mcp_codex_collaboration__list_agents']);
+  assert.deepEqual(toolNames(new Map([['exec', catalog.get('exec')]])), ['mcp_codex_exec']);
+  const shellOnly = codexToolCatalog([{ type: 'custom', name: 'exec', description: 'Run a shell script.' }]);
+  assert.equal(toolNames(shellOnly), null, 'Only suggest ALL_TOOLS when the current exec tool documents it');
+  assert.deepEqual(antigravityToolSuggestions(new Map(), prefix), []);
+});
 
 test('a chat delivery survives a later tool marker and is acknowledged only after delivery', () => {
   const turn = { threadId: 'chat-receiver', agentMessageIds: new Set() };

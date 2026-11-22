@@ -67,6 +67,20 @@ export function codexToolCatalog(tools) {
   return catalog;
 }
 
+/** Suggests Codex tool routes from this turn's actual catalogue. — GPT-6.2 Sol */
+export function antigravityToolSuggestions(catalog, prefix) {
+  if (!catalog.size) return [];
+  const exec = catalog.get('exec');
+  const browser = catalog.get('cua_repl__js');
+  const collaboration = [...catalog.values()].find((entry) => entry.namespace === 'collaboration');
+  return [
+    exec?.mcpTool.description.includes('ALL_TOOLS') && `For Codex app actions and connected services, consider \`${prefix}${exec.mcpTool.name}\` and look in ALL_TOOLS for the tools available now.`,
+    browser && `For the in-app browser or desktop interaction, consider \`${prefix}${browser.mcpTool.name}\` using its browser and app documentation.`,
+    collaboration && `For Codex agent coordination, see the offered collaboration tools, such as \`${prefix}${collaboration.mcpTool.name}\`. Follow the user's delegation instructions.`,
+    'Use the current tool descriptions to choose what fits. If the needed action is unavailable in Codex, explain the limitation.',
+  ].filter(Boolean);
+}
+
 /**
  * Serves the Codex tool catalog to one Claude process over MCP (JSON-RPC lines on a private socket).
  * `onCall` receives each tool call; the call stays open until `reply` is called.

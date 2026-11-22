@@ -1,3 +1,4 @@
+// Verifies reload safety and model-list refresh with disposable bridge processes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -178,9 +179,18 @@ test('source reload waits for a Claude turn between Codex tool responses', { tim
   assert.equal(saved.sessions[marker.sid]?.threadId, 'reload-owner');
 });
 
-test('source reload waits for compaction after its HTTP client disconnects', { timeout: 8000 }, async (t) => {
+test('source reload waits for disconnected compaction without saving an undelivered marker', { timeout: 8000 }, async (t) => {
   const bridge = await startReloadBridge(t, 'hold-compact');
-  const response = await fetch(bridge.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'claude-opus-5-5', input: [{ type: 'reasoning', summary: [], encrypted_content: 'ccb:v1:11111111-1111-4111-8111-111111111111:initial' }, { type: 'compaction_trigger' }] }) });
+  const session = '11111111-1111-4111-8111-111111111111';
+  const input = [
+    { type: 'reasoning', summary: [], encrypted_content: `ccb:v1:${session}:initial` },
+    { type: 'compaction_trigger' },
+  ];
+  const response = await fetch(bridge.url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-opus-5-5', input }),
+  });
   const reader = response.body.getReader();
   await reader.read();
   const deadline = Date.now() + 2000;
@@ -193,4 +203,7 @@ test('source reload waits for compaction after its HTTP client disconnects', { t
   fs.writeFileSync(bridge.releaseFile, 'finish');
   await bridge.closed;
   assert.equal(bridge.child.exitCode, 0, bridge.log());
+  const stateFile = path.join(bridge.directory, 'state.json');
+  const saved = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : {};
+  assert.equal(saved.sessions?.[session], undefined, 'the disconnected response cannot publish a new session marker');
 });

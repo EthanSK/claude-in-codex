@@ -15,6 +15,7 @@ import {
   CODEX_TOOLS_SERVER,
   CodexToolServer,
   codexToolCatalog,
+  antigravityToolSuggestions,
   codexOutputToMcp,
   forgetCodexCalls,
   isCodexToolName,
@@ -208,6 +209,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       `The Codex workspace is ${cwd}. Your native working directory is separate from the Codex workspace.`,
       'Use the offered Codex MCP tools for all file, shell and app actions. Codex applies the user’s permissions.',
       parsed.planMode ? 'Codex is in Plan mode. Do not perform writes or other mutations, including through Codex tools.' : '',
+      ...antigravityToolSuggestions(catalog, toolPrefix),
     ].filter(Boolean).join('\n') : BRIDGE_NOTE;
     const system = [bridgeInstructions, questionsNote, !antigravity && catalog.size ? CODEX_TOOLS_NOTE : '', config.extraSystemPrompt, ...parsed.agentsMd, skills, parsed.codexMemory]
       .filter(Boolean)
@@ -428,7 +430,7 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     }
     function handOffCodexCalls() {
       handoffTimer = null;
-      if (!stream || !queuedCodexCalls.length || (antigravity && stream.res.destroyed)) return;
+      if (!stream?.canSend || !queuedCodexCalls.length) return;
       // Wait (up to a second) until the stdout event naming each call is handled, so its preceding text lands in this response.
       const unseen = queuedCodexCalls.some((call) => call.toolUseId && !ctx.tools.has(call.toolUseId));
       if (unseen && Date.now() - queuedCodexCalls[0].queuedAt < 1000) {
@@ -472,7 +474,8 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
     forgetCodexCalls(waiting.keys());
     codexToolServer?.close();
 
-    if (!stream || stream.closed || (antigravity && stream.res.destroyed)) return;
+    // After Stop the reply is already closed. Recording a new marker here would replace the one Codex actually received.
+    if (!stream?.canSend) return;
 
     const r = ctx.result;
     if (antigravity && (!r || r.is_error)) {

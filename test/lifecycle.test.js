@@ -1,3 +1,4 @@
+// Exercise bridge cancellation with disposable fake Claude processes and local test clients.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -19,6 +20,7 @@ process.env.FAKE_CLAUDE_LOG = claudeLog;
 const { createBridge } = await import('../src/server.js');
 const { DEFAULTS } = await import('../src/config.js');
 const { State } = await import('../src/state.js');
+const { parseMarker } = await import('../src/codexInput.js');
 const { createProcessStopper, closeStdioAfterExit, hasPendingProcessCleanup } = await import('../src/processControl.js');
 
 // Bridge info lines, captured so lifecycle events can be asserted without printing them.
@@ -166,6 +168,54 @@ async function openSocket(headers = {}) {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/backend-api/codex/responses`, { headers });
   await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
   return socket;
+}
+
+for (const transport of ['http', 'websocket']) {
+  test(`stopping an active ${transport} turn preserves the last delivered marker and resumes the same session`, async () => {
+    const thread = `active-stop-${transport}`;
+    const input = [envContext, userMsg('remember this session')];
+    const first = doneItems((await responses(thread, body('claude-opus-5-5', input))).data);
+    const marker = first.map((item) => parseMarker(item.encrypted_content)).find(Boolean);
+    assert.ok(marker);
+    const history = [...input, ...first, userMsg('continue the slow native task')];
+    const before = claudeCalls().length;
+    let socket;
+    let activeRequest;
+    process.env.FAKE_CLAUDE_SCENARIO = 'hold-native';
+    process.env.FAKE_CLAUDE_HOLD_FILE = path.join(tmp, `never-release-${transport}`);
+    try {
+      if (transport === 'websocket') {
+        socket = await openSocket();
+        socket.send(JSON.stringify({ type: 'response.create', ...JSON.parse(body('claude-opus-5-5', history)), client_metadata: { thread_id: thread } }));
+      } else {
+        activeRequest = http.request({ host: '127.0.0.1', port, path: '/backend-api/codex/responses', method: 'POST', headers: { 'content-type': 'application/json', 'thread-id': thread } }, (response) => response.resume());
+        activeRequest.on('error', () => {}); // Destroying this task-owned request is the Stop signal under test.
+        activeRequest.end(body('claude-opus-5-5', history));
+      }
+      await waitFor(() => claudeCalls().length > before, 2000, 'the active fake native turn');
+    } finally {
+      delete process.env.FAKE_CLAUDE_SCENARIO;
+      delete process.env.FAKE_CLAUDE_HOLD_FILE;
+      if (socket) {
+        const closed = once(socket, 'close');
+        socket.close();
+        await closed;
+      }
+      activeRequest?.destroy();
+    }
+    const stopped = claudeCalls().at(-1);
+    spawnedPids.add(stopped.pid);
+    await waitFor(async () => !(await health()).turns.some((turn) => turn.pid === stopped.pid), 4000, 'the stopped native turn to exit');
+    const markerPreserved = bridge.state.isLatestTurn(marker.sid, marker.turnId);
+    const next = [...history, userMsg('<turn_aborted>The user stopped the previous turn.</turn_aborted>'), userMsg('answer me first')];
+    await responses(thread, body('claude-opus-5-5', next));
+    const resumed = claudeCalls().at(-1);
+    const resumeIndex = resumed.args.indexOf('--resume');
+    assert.deepEqual({ markerPreserved, resumedSession: resumeIndex < 0 ? null : resumed.args[resumeIndex + 1] }, { markerPreserved: true, resumedSession: marker.sid }, 'Stop must not replace the delivered marker with one Codex never received');
+    const sent = JSON.parse(resumed.stdin).message.content[0].text;
+    assert.equal(sent.split('</codex_context>\n\n').at(-1), 'answer me first', 'the interrupted implementation request remains history, not the current instruction');
+    assert.ok(logLines.some((line) => line.includes('lifecycle exit') && line.includes(`pid=${stopped.pid}`) && line.includes('reason=client-gone')));
+  });
 }
 
 test('a GPT agent turn in the same chat stops the Claude process still waiting for its Codex tool result', async () => {

@@ -42,8 +42,12 @@ export class ResponsesStream {
     };
   }
 
+  get canSend() {
+    return !this.closed && !this.res.writableEnded && !this.res.destroyed;
+  }
+
   send(type, payload) {
-    if (this.closed || this.res.writableEnded || this.res.destroyed) return;
+    if (!this.canSend) return;
     const data = JSON.stringify({ type, sequence_number: this.seq++, ...payload });
     this.res.write(`event: ${type}\ndata: ${data}\n\n`);
   }
