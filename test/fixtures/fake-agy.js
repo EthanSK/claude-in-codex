@@ -20,7 +20,7 @@ let firstReasoningOnly = false;
 let compactedNativeHistory = false;
 let toolPromptAttempted = false;
 const scenario = process.env.FAKE_AGY_SCENARIO;
-const endsAfterTool = scenario === 'commentary-then-tool' || scenario === 'answer-after-tool';
+const endsAfterTool = ['commentary-then-tool', 'commentary-then-tool-and-thought', 'answer-after-tool'].includes(scenario);
 let toolSocket;
 const permissions = new Map([
   [101, [sid, 'mcp_codex_echo', 'temporary']],
@@ -64,7 +64,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
         socket.destroy();
       }
       if (scenario === 'answer-after-tool') update('agent_message_chunk', 'I found the file.');
-      else update('agent_thought_chunk', 'Only internal reasoning followed the work.');
+      else if (scenario === 'commentary-then-tool-and-thought') update('agent_thought_chunk', 'Only internal reasoning followed the work.');
       reply(id, { stopReason: 'end_turn' });
       continue;
     }

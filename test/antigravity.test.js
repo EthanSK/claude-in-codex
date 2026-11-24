@@ -91,7 +91,7 @@ test('Antigravity continues a cancelled request when its only tool was denied', 
 test('Antigravity reports an empty answer after an approved tool without replaying work', () => {
   const events = runAdapter('approved-tool', 1);
   assert.equal(events.at(-1).is_error, true);
-  assert.match(events.at(-1).result, /finished without a visible reply/);
+  assert.match(events.at(-1).result, /stopped before giving a final reply/);
 });
 
 test('Antigravity switches providers and then compacts the same native session with pending tool output', async () => {
@@ -186,7 +186,7 @@ test('Antigravity requires a final answer after its last Codex tool handoff', as
       .map((line) => JSON.parse(line.slice(6))).at(-1);
   }
 
-  for (const scenario of ['commentary-then-tool', 'answer-after-tool']) {
+  for (const scenario of ['commentary-then-tool', 'commentary-then-tool-and-thought', 'answer-after-tool']) {
     process.env.FAKE_AGY_SCENARIO = scenario;
     const input = [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Check the file.' }] }];
     const first = await turn(scenario, input);
@@ -205,7 +205,7 @@ test('Antigravity requires a final answer after its last Codex tool handoff', as
       assert.equal(final.response.output.find((item) => item.phase === 'final_answer')?.content[0].text, 'I found the file.');
     } else {
       assert.equal(final.type, 'response.failed');
-      assert.match(final.response.error.message, /stopped before giving a final reply/);
+      assert.match(final.response.error.message, /^Antigravity stopped\. Gemini stopped before giving a final reply/);
       const [, , sid, turnId] = items.find((item) => item.encrypted_content?.startsWith('ccb:v1:')).encrypted_content.split(':');
       assert.equal(state.isLatestTurn(sid, turnId), true, 'Keep the last delivered session marker');
     }

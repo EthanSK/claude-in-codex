@@ -65,6 +65,7 @@ async function run({
   let nextId = 0;
   let stopped = false;
   let sawReply = false;
+  let hasFinalReply = false;
   const possibleToolRuns = new Map();
   let untrackedTool = false;
   const send = (message) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
@@ -103,15 +104,23 @@ async function run({
       if (compact || !prompting || params?.sessionId !== sessionId) return;
       if (update?.sessionUpdate === 'tool_call') {
         const callId = update.toolCallId;
+        // Progress before a new tool call is already commentary in Codex.
+        if (!callId || !possibleToolRuns.has(callId)) hasFinalReply = false;
         if (!callId) untrackedTool = true;
         else if (!possibleToolRuns.has(callId)) possibleToolRuns.set(callId, true);
       }
       if (update?.content?.type !== 'text') return;
       if (update.sessionUpdate === 'agent_message_chunk') {
-        if (update.content.text.trim()) sawReply = true;
+        if (update.content.text.trim()) {
+          sawReply = true;
+          hasFinalReply = true;
+        }
         delta({ type: 'text_delta', text: update.content.text });
       }
-      if (update.sessionUpdate === 'agent_thought_chunk') delta({ type: 'thinking_delta', thinking: update.content.text });
+      if (update.sessionUpdate === 'agent_thought_chunk' && update.content.text) {
+        hasFinalReply = false; // The bridge closes the last message as commentary when reasoning begins.
+        delta({ type: 'thinking_delta', thinking: update.content.text });
+      }
       return;
     }
     if (id === undefined) return;
@@ -201,7 +210,10 @@ async function run({
       const continued = await sendPrompt([{ type: 'text', text: recovery }]);
       for (const [key, value] of Object.entries(continued)) usage[key] = (usage[key] || 0) + value;
     }
-    if (!compact && !sawReply) throw new Error('Neon finished without a visible reply. The turn can be retried in this chat.');
+    // This adapter is started for every turn, so the bridge can surface this error without a service restart.
+    if (!compact && !hasFinalReply) {
+      throw new Error('Gemini stopped before giving a final reply. Check any tool results before retrying.');
+    }
 
     // ACP reports fresh input, cached input, and thought tokens separately.
     const counts = {
