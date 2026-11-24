@@ -275,6 +275,8 @@ Neon accepts embedded image attachments and supports Codex compaction. The bridg
 
 ## Troubleshooting
 
+- **Gemini sends progress and then stops.** If Gemini ends without a final reply, Codex shows an error. Check the tool results before retrying, since any completed tools may already have changed files or taken other actions.
+
 - **The picker shrinks to GPT-5.5, Opus and Fable, or the current model says Custom.** Older Codex clients receive a different GPT catalogue from newer desktop clients. Earlier bridge versions kept one shared fallback, so an older client could replace the desktop's list during an upstream outage. The bridge now keeps successful catalogues separately by endpoint, request query (including client version) and account context. If no matching cached list exists, it returns a catalogue error instead of a successful incomplete list. Update/reload the bridge, then reopen the affected chat's picker after Codex refreshes its model list. A different client's success does not establish that this chat refreshed.
 
 - **Claude models don't show in the picker.** Quit Codex completely (Cmd+Q) and reopen it. Check `curl http://127.0.0.1:18787/health` and that `~/.codex/config.toml` starts with the `openai_base_url` line.

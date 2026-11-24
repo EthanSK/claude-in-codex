@@ -505,6 +505,12 @@ export async function runClaudeTurn({ config, state, stream, parsed, modelCfg, e
       stream.textDelta(`**Claude Code stopped:** ${reason}`);
       log.error(`claude failed (code ${exitCode}): ${reason}`);
     }
+    // Earlier text becomes commentary at a handoff. Only text in this response can finish the turn.
+    if (antigravity && !stream.hasOpenReplyText()) {
+      log.error('antigravity finished without final reply text');
+      stream.fail(`${modelCfg.displayName} stopped before giving a final reply. Check any tool results before retrying.`);
+      return;
+    }
     stream.closeOpen('final_answer');
 
     if (ctx.sid) {

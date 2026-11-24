@@ -84,6 +84,10 @@ export class ResponsesStream {
     return this.open?.kind === 'message';
   }
 
+  hasOpenReplyText() {
+    return this.hasOpenMessage() && this.open.text.trim().length > 0;
+  }
+
   // ---- reasoning (thinking + tool activity) ---------------------------------
   reasoningDelta(delta, { marker } = {}) {
     if (!delta) return;

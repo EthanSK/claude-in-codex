@@ -147,3 +147,67 @@ test('Antigravity switches providers and then compacts the same native session w
     state.flush();
   }
 });
+
+
+test('Antigravity requires a final answer after its last Codex tool handoff', async (t) => {
+  const { createBridge } = await import('../src/server.js');
+  const { DEFAULTS } = await import('../src/config.js');
+  const { State } = await import('../src/state.js');
+  const state = new State(path.join(bridgeHome, 'final-reply-state.json'));
+  const { server } = createBridge({
+    ...DEFAULTS, models: [neon], logLevel: 'error',
+    antigravityPath: fileURLToPath(new URL('./fixtures/fake-agy.js', import.meta.url)),
+  }, state);
+  const envKeys = ['FAKE_AGY_SCENARIO', 'HOME', 'PATH'];
+  const previousEnv = envKeys.map((name) => [name, process.env[name]]);
+  process.env.HOME = bridgeHome;
+  process.env.PATH = [path.dirname(process.execPath), process.env.PATH].join(path.delimiter);
+  t.after(async () => {
+    for (const [name, value] of previousEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await new Promise((resolve) => server.close(resolve));
+    state.flush();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  async function turn(thread, input) {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/backend-api/codex/responses`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'thread-id': thread },
+      body: JSON.stringify({
+        model: neon.slug, reasoning: { effort: 'low' }, input,
+        tools: [{ type: 'function', name: 'echo', parameters: { type: 'object' } }],
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.ok(res.ok);
+    return (await res.text()).split('\n').filter((line) => line.startsWith('data: {'))
+      .map((line) => JSON.parse(line.slice(6))).at(-1);
+  }
+
+  for (const scenario of ['commentary-then-tool', 'answer-after-tool']) {
+    process.env.FAKE_AGY_SCENARIO = scenario;
+    const input = [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Check the file.' }] }];
+    const first = await turn(scenario, input);
+    assert.equal(first.type, 'response.completed');
+    assert.equal(first.response.end_turn, false);
+    const items = first.response.output;
+    assert.equal(items.find((item) => item.type === 'message')?.phase, 'commentary');
+    const call = items.find((item) => item.type === 'function_call');
+    assert.equal(call?.name, 'echo');
+    const final = await turn(scenario, [
+      ...input, ...items,
+      { type: 'function_call_output', call_id: call.call_id, output: 'tool completed' },
+    ]);
+    if (scenario === 'answer-after-tool') {
+      assert.equal(final.type, 'response.completed');
+      assert.equal(final.response.output.find((item) => item.phase === 'final_answer')?.content[0].text, 'I found the file.');
+    } else {
+      assert.equal(final.type, 'response.failed');
+      assert.match(final.response.error.message, /stopped before giving a final reply/);
+      const [, , sid, turnId] = items.find((item) => item.encrypted_content?.startsWith('ccb:v1:')).encrypted_content.split(':');
+      assert.equal(state.isLatestTurn(sid, turnId), true, 'Keep the last delivered session marker');
+    }
+  }
+});

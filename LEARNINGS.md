@@ -23,6 +23,14 @@ Each entry looks like:
 
 (newest first)
 
+---
+**Date:** 2026-11-24
+**Symptom:** A bridged Gemini turn finished successfully after a progress message and 18 Codex tool handoffs, but the Codex turn had no final answer.
+**Cause:** The adapter had seen text earlier in the provider turn. The runner had already closed that text as commentary when it handed a tool to Codex. The final response completed with reasoning only.
+**Fix:** At the point the runner sends the final response, require nonblank final reply text for Antigravity. Report a non-retryable error if it is missing. Keep the session marker from the last tool handoff and avoid replaying tools that might already have changed something. Native compaction and the adapter's limited recovery for turns with no executed tool keep their existing paths.
+**Guard:** The local ACP fixture emits commentary, runs a tool through the real bridge handoff, and returns reasoning only on completion. It also verifies a real final answer after the same sequence still succeeds.
+---
+
 
 ---
 **Date:** 2026-11-22

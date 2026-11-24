@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import readline from 'node:readline';
 import fs from 'node:fs';
+import net from 'node:net';
 
 const sid = '8ec454da-f0d0-48bf-b487-429d0d2005fa';
 const emit = (data) => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...data })}\n`);
@@ -19,6 +20,8 @@ let firstReasoningOnly = false;
 let compactedNativeHistory = false;
 let toolPromptAttempted = false;
 const scenario = process.env.FAKE_AGY_SCENARIO;
+const endsAfterTool = scenario === 'commentary-then-tool' || scenario === 'answer-after-tool';
+let toolSocket;
 const permissions = new Map([
   [101, [sid, 'mcp_codex_echo', 'temporary']],
   [102, ['wrong-session', 'mcp_codex_echo', 'decline']],
@@ -27,7 +30,12 @@ const permissions = new Map([
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const { id, method, params, result } = JSON.parse(line);
   if (method === 'initialize') reply(id, { protocolVersion: 1 });
-  else if (method === 'session/new' && scenario === 'compact') reply(id, { sessionId: sid });
+  else if (method === 'session/new' && (scenario === 'compact' || endsAfterTool)) {
+    if (endsAfterTool) {
+      toolSocket = params.mcpServers[0].env.find(({ name }) => name === 'CODEX_CLAUDE_BRIDGE_TOOLS_SOCKET').value;
+    }
+    reply(id, { sessionId: sid });
+  }
   else if (method === 'session/load') {
     assert.equal(params.sessionId, sid);
     update('agent_message_chunk', 'Old replayed history');
@@ -37,6 +45,29 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     assert.equal(params.value, settings[params.configId]);
     reply(id, { configOptions: [{ id: params.configId, currentValue: params.value }] });
   } else if (method === 'session/prompt') {
+    if (endsAfterTool) {
+      assert.equal(toolPromptAttempted, false, 'Never replay a prompt after a tool ran');
+      toolPromptAttempted = true;
+      update('agent_message_chunk', 'I’ll check the file.');
+      emit({
+        method: 'session/update',
+        params: { sessionId: sid, update: { sessionUpdate: 'tool_call', toolCallId: 'fixture-read', status: 'pending' } },
+      });
+      const socket = net.createConnection(toolSocket);
+      socket.write(JSON.stringify({ id: 1, method: 'tools/call', params: { name: 'echo', arguments: {} } }) + '\n');
+      const responses = readline.createInterface({ input: socket });
+      try {
+        const result = await responses[Symbol.asyncIterator]().next();
+        assert.match(result.value, /tool completed/);
+      } finally {
+        responses.close();
+        socket.destroy();
+      }
+      if (scenario === 'answer-after-tool') update('agent_message_chunk', 'I found the file.');
+      else update('agent_thought_chunk', 'Only internal reasoning followed the work.');
+      reply(id, { stopReason: 'end_turn' });
+      continue;
+    }
     if (scenario === 'denied-tool' || scenario === 'approved-tool') {
       if (!toolPromptAttempted) {
         toolPromptAttempted = true;
